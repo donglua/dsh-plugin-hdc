@@ -4,7 +4,28 @@ HarmonyOS device tools for DeepSeek Harness, over `hdc`.
 
 The plugin registers a family of `hdc_*` tools, so a HarmonyOS device can be
 driven from the conversation: see the screen, tap, read the control tree, install
-an app, read logs, move files, and record the screen.
+an app, read logs, move files, and record the screen. It also adds a device panel
+to the sidebar, for driving the same device without a conversation turn.
+
+## Device panel
+
+Open the phone icon in the sidebar to reach a full-page panel for the attached
+device:
+
+- **Screen mirror** — the capture refreshes on a switch, at roughly 1.5 s. Tap
+  anywhere on the image to tap that point on the device; the image is scaled, so
+  the panel converts back to device pixels before sending.
+- **Back / Home / Power**, plus a manual refresh and a text row for typing into
+  the focused field.
+- **Interface hierarchy** — collapsible; each row carries a button that taps that
+  control's own center, so a control without a label is still reachable.
+- **Crash log** — the last crash lines, with a filter toggle.
+
+The panel talks to the Host half over `/hdc/*` on the page's own origin. Nothing
+leaves the machine, and the browser never calls `hdc` directly.
+
+Every panel action is the same operation an `hdc_*` tool performs; the tools stay
+available and are the way to do anything the panel does not show.
 
 ## Requirements
 
@@ -27,7 +48,7 @@ its absolute path.
 | `hdc_input` | `click`, `doubleClick`, `longClick`, `swipe`, `drag`, `fling`, `text`, `key` via `uitest uiInput`. |
 | `hdc_ui_tree` | `uitest dumpLayout`, reported as type, text, bounds, and the center point to tap. |
 | `hdc_app` | `install`, `uninstall`, `start`, `stop`, `current`, `list`. |
-| `hdc_log` | `hilog -x`, filtered by keyword or by crash markers. |
+| `hdc_log` | `hilog -z`, filtered by keyword or by crash markers. |
 | `hdc_file` | `file send`, `file recv`, or an arbitrary device `shell` command. |
 | `hdc_record` | `screenrecord` into a local `.mp4` of bounded length. |
 
@@ -88,7 +109,7 @@ already-installed copy needs a restart to load the new module generation.
 ## Development
 
 ```sh
-npm test          # 36 offline tests against a fake hdc
+npm test          # 63 offline tests: tools, routes, and a fake hdc
 npm run test:schema   # tool and config schemas, checked with the installed harness
 ```
 
