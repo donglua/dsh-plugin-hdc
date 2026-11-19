@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36" role="img" aria-label="HarmonyOS device tools">
+  <!-- Device -->
+  <rect x="9.5" y="4.5" width="15" height="27" rx="3.4" fill="none" stroke="#3B6FE0" stroke-width="2.2"/>
+  <!-- Screen content -->
+  <rect x="13" y="8.6" width="8" height="8" rx="1.4" fill="#3B6FE0"/>
+  <rect x="13" y="19.2" width="8" height="1.9" rx="0.95" fill="#8FB4F5"/>
+  <rect x="13" y="22.8" width="5" height="1.9" rx="0.95" fill="#8FB4F5"/>
+  <!-- Live connection -->
+  <path d="M24.8 14.6h3.1a2 2 0 0 1 2 2v6" fill="none" stroke="#1F9D74" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="29.9" cy="26.2" r="2.7" fill="#1F9D74"/>
+  <circle cx="26.4" cy="9.8" r="2.1" fill="#1F9D74" opacity="0.5"/>
+</svg>

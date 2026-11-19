@@ -1,0 +1,36 @@
+{
+  "name": "dsh-plugin-hdc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HarmonyOS device tools over hdc: screen capture, touch input, UI hierarchy, app management, logs, file transfer, and screen recording",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "lib",
+    "locale/*.json",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/",
+    "test:schema": "ELECTRON_RUN_AS_NODE=1 \"$DSH_NODE_EXECUTABLE\" tests/schema-check.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/donglua/dsh-plugin-hdc.git"
+  },
+  "author": "donglua",
+  "license": "MIT"
+}

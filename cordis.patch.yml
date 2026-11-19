@@ -1,0 +1,7 @@
+# Your patch layer for this dsh profile, applied after every bundle layer.
+# This bundle inserts its own plugin row; keep the id stable so a later patch
+# can target it for configuration.
+- insert:
+    - id: hdc-tools
+      name: dsh-plugin-hdc
+      config: {}

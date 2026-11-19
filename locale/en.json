@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "HarmonyOS device tools",
+    "description": "Drives a HarmonyOS device over hdc from the conversation. Screen capture returns the image itself, and touch input, UI hierarchy dumps, app install and launch, hilog reads, file transfer, and screen recording are available as separate tools. Every tool finds the hdc client and the attached device on its own; the screenshot tool needs an image-capable model, and calls act on a real device immediately, so treat a tap or an install as a real change. Set hdcPath when hdc is not in the DevEco Studio default location."
+  }
+}
