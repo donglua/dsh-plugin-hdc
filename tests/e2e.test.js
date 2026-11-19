@@ -200,6 +200,33 @@ test('log keyword filtering is case-insensitive', async () => {
   }
 })
 
+test('log reading bounds the tail with the flag the client actually accepts', async () => {
+  const h = await harness()
+  try {
+    // The fake rejects `-x` with `-z` (CODE: -31) and rejects `-n` outright, as
+    // the real client does, so a regression to either form fails this call.
+    const value = await h.tools.get('hdc_log').execute({ lines: 250 }, exec())
+    // Four printed lines, plus the empty segment a trailing newline leaves.
+    assert.equal(value.scanned, 5)
+    assert.match(value.content, /CppCrash/u)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('crash filtering ignores a subsystem name that merely contains fault', async () => {
+  const h = await harness()
+  try {
+    const value = await h.tools.get('hdc_log').execute({ crash: true }, exec())
+    // "FaultLeakDetectorManager" appears in ordinary lifecycle lines; matching a
+    // bare "fault" would report those as crashes.
+    assert.equal(value.content.includes('FaultLeakDetectorManager'), false)
+    assert.equal(value.matches, 1, 'only the CppCrash line qualifies')
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a file is received into the download directory', async () => {
   const h = await harness()
   try {

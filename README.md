@@ -64,14 +64,20 @@ plugin loads, naming the field, rather than failing partway through a device cal
 - **Remote scratch files are cleaned up.** Temporary files under
   `/data/local/tmp` are removed on every exit path, including a failed capture,
   and the removal is awaited before the call returns.
+- **Logs are bounded by `hilog -z`.** `-z N` reads the last N lines and exits.
+  It cannot be combined with `-x`: hilog rejects that pair with
+  `Mutlti commands can't be used in combination [CODE: -31]`, and `-n` is not a
+  line-count flag at all.
 
 ## Limits
 
 - Screen recording downloads a video; it cannot be viewed in the conversation.
 - The control tree reflects the accessibility tree, so a drawn-only element
   without a semantic node will not appear in it.
-- Verified offline against a fake `hdc` and against the harness tool-schema
-  assertion. Not yet exercised against a physical device.
+- Exercised on a HarmonyOS device (`hdc` 3.2.0f) for device listing, screenshot,
+  touch input, hierarchy dump, foreground mission listing, and log reading.
+  Package install and uninstall, file transfer, and screen recording are covered
+  only by the fake client, not yet by a physical device.
 
 ## Install
 

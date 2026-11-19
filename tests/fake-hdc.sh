@@ -77,9 +77,23 @@ case "${1:-}" in
         exit 0
         ;;
       *hilog*)
+        # Mirror the real client: -x and -z are mutually exclusive, and -n is
+        # not a line-count flag at all. A tool that sends either must fail here
+        # rather than pass against a fake that accepts anything.
+        case "$command" in
+          *"-x"*"-z"*|*"-z"*"-x"*)
+            printf "Mutlti commands can't be used in combination [CODE: -31]\n"
+            exit 1
+            ;;
+          *" -n "*)
+            printf '[Fail]invalid argument: -n is not a line-count flag\n'
+            exit 1
+            ;;
+        esac
         printf '11-19 19:00:00.000  1234  1234 I A00000/App: started ok\n'
         printf '11-19 19:00:01.000  1234  1234 E A00000/App: CppCrash happened here\n'
         printf '11-19 19:00:02.000  1234  1234 I A00000/App: still fine\n'
+        printf '11-19 19:00:03.000   597  2492 I C02DA0/hiview/FaultLeakDetectorManager: OnForegroundChanged: cn.example.app\n'
         exit 0
         ;;
       *aa\ start*|*aa\ force-stop*|*aa\ dump*)
