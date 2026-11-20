@@ -88,7 +88,7 @@ test('every output schema field a renderer reads is declared required', () => {
     hdc_app: ['device', 'action', 'output'],
     hdc_log: ['device', 'scanned', 'matches', 'content'],
     hdc_file: ['device', 'action', 'output'],
-    hdc_record: ['device', 'savedPath', 'seconds', 'bytes'],
+    hdc_record: ['device', 'savedPath', 'seconds', 'bytes', 'kind', 'frames'],
   }
   const tools = harness()
   for (const [name, fields] of Object.entries(expectations)) {

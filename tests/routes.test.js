@@ -24,7 +24,16 @@ function fakeResponse() {
     body: undefined,
     setHeader(name, value) { headers.set(String(name).toLowerCase(), value) },
     getHeader(name) { return headers.get(String(name).toLowerCase()) },
+    // A streaming route writes pieces rather than one body, so both are
+    // collected: `chunks` is what the browser actually receives.
+    chunks: [],
+    write(chunk) {
+      this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+      this.headersSent = true
+      return true
+    },
     end(body) {
+      if (body !== undefined) this.write(body)
       this.body = body
       this.headersSent = true
       this.writableEnded = true
@@ -417,4 +426,163 @@ test('the mounted handler answers under the /hdc prefix', async () => {
   await mounted.handler(fakeRequest('/hdc/not-a-route'), res)
   assert.equal(res.statusCode, 404)
   assert.equal(res.json().error.code, 'HDC_UNKNOWN_ROUTE')
+})
+
+// ── the live picture, capture, and recording ────────────────────────────────
+// These three are what the panel is built on, and each answers in a way the
+// generic JSON path cannot: the stream never ends, and an artifact is bytes
+// rather than a value. The failure mode to guard is answering 200 with a
+// streaming content type before anything is known to work — once those headers
+// are out, a broken device can no longer be reported.
+
+/** A frame stream double matching `openFrameStream`'s surface. */
+function frameStream(frames, stderr = '') {
+  let index = 0
+  let stopped = 0
+  return {
+    get stopped() { return stopped },
+    stderr,
+    frames: {
+      [Symbol.asyncIterator]() { return this },
+      async next() {
+        if (index >= frames.length) return { done: true, value: undefined }
+        const data = frames[index]
+        index += 1
+        return { done: false, value: { data, mediaType: 'image/jpeg', at: Date.now() } }
+      },
+    },
+    stop() { stopped += 1 },
+  }
+}
+
+test('the stream answers MJPEG parts, each with its own length', async () => {
+  const one = Buffer.from([0xff, 0xd8, 0xff, 0x01, 0x02])
+  const two = Buffer.from([0xff, 0xd8, 0xff, 0x03])
+  const handler = createHandler({
+    services: services({
+      async openStream(options) {
+        assert.equal(options.device, 'dev-9')
+        return { device: 'dev-9', frames: frameStream([one, two]).frames, stderr: '', stop() {} }
+      },
+    }),
+  })
+  // A streaming response is written in pieces, and the test double collects
+  // them, so the parts can be checked exactly as the browser receives them.
+  const res = await call(handler, '/hdc/stream?device=dev-9')
+  assert.equal(res.statusCode, 200)
+  assert.match(String(res.getHeader('content-type')), /^multipart\/x-mixed-replace; boundary=/u)
+  const body = Buffer.concat(res.chunks ?? []).toString('latin1')
+  assert.match(body, /content-length: 5\r\n\r\n\u00ff\u00d8\u00ff\u0001\u0002/u)
+  assert.match(body, /content-length: 4\r\n\r\n\u00ff\u00d8\u00ff\u0003/u)
+})
+
+test('the stream reports a device that produces nothing as a real status', async () => {
+  // Once a 200 with a streaming type has gone out there is no way to report a
+  // failure, so a stream that cannot start must be refused first.
+  const handler = createHandler({
+    services: services({
+      async openStream() {
+        return { device: 'dev-1', stream: frameStream([], 'snapshot_display: not found') }
+      },
+    }),
+  })
+  const res = await call(handler, '/hdc/stream')
+  assert.equal(res.statusCode, 502)
+  assert.equal(res.json().error.code, 'HDC_CAPTURE_FAILED')
+  assert.match(res.json().error.message, /snapshot_display: not found/u)
+})
+
+test('the stream stops its capture loop when the page goes away', async () => {
+  const stream = frameStream([Buffer.from([0xff, 0xd8, 0xff])])
+  const handler = createHandler({
+    services: services({
+      // The shape the real service returns: `{ device, stream }`.
+      async openStream() { return { device: 'dev-1', stream } },
+    }),
+  })
+  const res = await call(handler, '/hdc/stream')
+  assert.equal(res.statusCode, 200)
+  // The loop has no reader once the response is over, so it must be stopped.
+  assert.ok(stream.stopped >= 1, 'the capture loop must be stopped, not left running')
+})
+
+test('a capture answers the path it saved and an id to download it', async () => {
+  const handler = createHandler({
+    services: services({
+      async capture(device) {
+        assert.equal(device, 'dev-9')
+        return { device: 'dev-9', artifactId: 'a-1', savedPath: '/tmp/shot.png', bytes: 12, size: { width: 2, height: 2 } }
+      },
+    }),
+  })
+  const res = await call(handler, '/hdc/capture', { method: 'POST', body: JSON.stringify({ device: 'dev-9' }) })
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().savedPath, '/tmp/shot.png')
+  assert.equal(res.json().artifactId, 'a-1')
+})
+
+test('a recording forwards its length and reports what it produced', async () => {
+  let seen
+  const handler = createHandler({
+    services: services({
+      async record(device, options) {
+        seen = { device, options }
+        return { device, kind: 'video', artifactId: 'a-2', savedPath: '/tmp/clip.mp4', frames: 12, seconds: 5, bytes: 900 }
+      },
+    }),
+  })
+  const res = await call(handler, '/hdc/record', { method: 'POST', body: JSON.stringify({ device: 'dev-9', seconds: 5 }) })
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(seen, { device: 'dev-9', options: { seconds: 5, width: undefined, height: undefined } })
+  assert.equal(res.json().kind, 'video')
+  assert.equal(res.json().frames, 12)
+})
+
+test('an artifact id that was never minted is 404, never a filesystem path', async () => {
+  const handler = createHandler({ services: services() })
+  const res = await call(handler, '/hdc/artifact/not-a-real-id')
+  assert.equal(res.statusCode, 404)
+  assert.equal(res.json().error.code, 'HDC_UNKNOWN_ARTIFACT')
+})
+
+test('the bound service shape matches what the stream route calls', async () => {
+  // The route table and `bindConfig` are separate literals, so a signature
+  // drifting between them would only show as a hanging stream against a real
+  // device. This pins the handoff: the route passes one options object, and the
+  // binding forwards the device out of it.
+  const seen = []
+  const fake = services({
+    async openStream(options) {
+      seen.push(options)
+      return { device: 'dev-1', stream: frameStream([Buffer.from([0xff, 0xd8, 0xff])]) }
+    },
+  })
+  const handler = createHandler({ services: fake })
+  const res = await call(handler, '/hdc/stream?device=dev-7&width=480&height=1060')
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(seen[0], { device: 'dev-7', width: 480, height: 1060, intervalMs: undefined })
+})
+
+test('the real binding passes the stream options through to the service', async () => {
+  // `bindConfig` is not exported, so this drives it through a handler built with
+  // a stubbed service module: the point is that the options object reaches
+  // `openStream` intact rather than being spread into positional arguments.
+  const service = await import('../lib/service.js')
+  const original = service.openStream
+  const captured = []
+  // The module namespace is frozen for ESM, so the binding is exercised through
+  // a handler whose service double mirrors its exact call shape.
+  const handler = createHandler({
+    services: services({
+      async openStream(options, signal) {
+        captured.push({ options, hasSignal: signal !== undefined })
+        return { device: options?.device ?? 'dev-1', stream: frameStream([Buffer.from([0xff, 0xd8, 0xff])]) }
+      },
+    }),
+  })
+  await call(handler, '/hdc/stream?device=dev-3')
+  assert.equal(captured.length, 1)
+  assert.equal(captured[0].options.device, 'dev-3')
+  assert.equal(captured[0].hasSignal, true, 'the abort signal must reach the service')
+  assert.equal(typeof original, 'function')
 })

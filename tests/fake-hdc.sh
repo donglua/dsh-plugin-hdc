@@ -21,6 +21,30 @@ write_png() {
   printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM4oaGhUXGCAUIBACIeBQHssus+AAAAAElFTkSuQmCC' | base64 -d > "$1"
 }
 
+write_frame() {
+  count="${1:-3}"
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    # A banner line first, as the real device prints one around the loop; the
+    # parser must drop it rather than treat it as a frame header.
+    [ "$i" -eq 0 ] && printf 'Welcome to hdc shell\n'
+    printf 'FRAME %s\n' "$(jpeg_bytes | wc -c | tr -d ' ')"
+    jpeg_bytes
+    i=$((i+1))
+  done
+}
+
+jpeg_bytes() {
+  printf '%s' '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5soooroMD/9k=' | base64 -d
+}
+
+# Every invocation is appended to a log when a caller asks for one, so a test can
+# count how many times a path spawns the client. Without it the only observable
+# is the final answer, which cannot tell one call from three.
+if [ -n "${DSH_HDC_FAKE_LOG:-}" ]; then
+  printf '%s %s\n' "${1:-}" "$*" >> "$DSH_HDC_FAKE_LOG"
+fi
+
 case "${1:-}" in
   list)
     if [ "$mode" = "empty" ]; then
@@ -37,6 +61,12 @@ case "${1:-}" in
     case "$remote" in
       *.png)
         write_png "$local"
+        if [ -s "$local" ]; then printf 'FileTransfer finish, Size:%s\n' "$(wc -c < "$local" | tr -d ' ')"; exit 0; fi
+        printf '[Fail]File transfer failed\n'
+        exit 1
+        ;;
+      *.jpeg|*.jpg)
+        jpeg_bytes > "$local"
         if [ -s "$local" ]; then printf 'FileTransfer finish, Size:%s\n' "$(wc -c < "$local" | tr -d ' ')"; exit 0; fi
         printf '[Fail]File transfer failed\n'
         exit 1
@@ -60,12 +90,31 @@ case "${1:-}" in
     shift
     command="$*"
     case "$command" in
-      *snapshot_display*)
-        printf 'snapshot ok\n'
+      # The frame loop is how the live picture and a recording read the screen.
+      # It has to answer the real protocol — a `FRAME <bytes>` line and then
+      # exactly those bytes — because the Host splits on the declared length,
+      # not on a delimiter. A bare "ok" here would pass a broken parser.
+      *dsh_frames*)
+        write_frame "${DSH_HDC_FAKE_FRAMES:-3}"
         exit 0
         ;;
+      *snapshot_display*)
+        # Mirror the real client: it validates the output suffix and refuses
+        # anything but `.jpeg`, printing exactly this pair of lines. A caller
+        # that asks for `.png` must fail here rather than pass against a fake
+        # that accepts any name.
+        case "$command" in
+          *.jpeg*|*.jpg*)
+            printf '\nsuccess: snapshot display 0 , write to jpeg, width: 2, height: 2\n'
+            exit 0
+            ;;
+        esac
+        printf 'fileType: \nerror: fileName invalid, suffix must be .jpeg\nerror: filename invalid!\n'
+        exit 1
+        ;;
       *screenCap*)
-        printf 'screenCap ok\n'
+        # Mirror the real client: it ignores the suffix and always writes PNG.
+        printf 'ScreenCap saved\n'
         exit 0
         ;;
       uitest\ uiInput*)

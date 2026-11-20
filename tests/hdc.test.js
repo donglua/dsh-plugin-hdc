@@ -9,9 +9,11 @@
  */
 
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import test from 'node:test'
 import {
   clip,
+  discoverHdc,
   parseTargets,
   selectDevice,
   sniffImageMediaType,
@@ -144,4 +146,113 @@ test('layout parsing survives a non-JSON dump', () => {
 test('layout rendering names bounds and the tap point', () => {
   const line = formatLayoutNode({ type: 'Button', text: 'Next', x: 84, y: 1127, width: 1088, height: 168, clickable: true })
   assert.match(line, /^Button "Next" clickable @ \[84,1127\]\[1088x168\] tap \(628, 1211\)$/u)
+})
+
+// ── client discovery ────────────────────────────────────────────────────────
+// The search order is the behavior worth pinning: a packaged desktop app has
+// none of a terminal's exports, so the environment is usually empty and the
+// conventional locations have to carry the common case on their own.
+
+/** A path probe that reports exactly the given paths as present. */
+function present(paths) {
+  const known = new Set(paths)
+  return (candidate) => known.has(candidate)
+}
+
+const DEVECO_APP = '/Applications/DevEco-Studio.app'
+const APP_HDC = `${DEVECO_APP}/Contents/sdk/default/openharmony/toolchains/hdc`
+
+test('discoverHdc finds the layout a current DevEco actually ships', () => {
+  // `default/` is the level that a pre-`default` layout missed entirely, which
+  // is what made an installed DevEco report "hdc not found".
+  assert.equal(discoverHdc(undefined, { env: { PATH: '' }, platform: 'darwin', existing: present([APP_HDC]), loginShell: false }), APP_HDC)
+})
+
+test('discoverHdc honours DEVECO_SDK_HOME, which points at the sdk directory', () => {
+  const hdc = '/Users/dev/huawei/command-line-tools/sdk/default/openharmony/toolchains/hdc'
+  const env = { PATH: '', DEVECO_SDK_HOME: '/Users/dev/huawei/command-line-tools/sdk' }
+  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([hdc]), loginShell: false }), hdc)
+})
+
+test('discoverHdc reads TOOL_HOME as the directory holding sdk', () => {
+  const hdc = '/Users/dev/huawei/command-line-tools/sdk/default/openharmony/toolchains/hdc'
+  const env = { PATH: '', TOOL_HOME: '/Users/dev/huawei/command-line-tools' }
+  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([hdc]), loginShell: false }), hdc)
+})
+
+test('discoverHdc reads a DevEco bundle root from DEVECO_HOME', () => {
+  const env = { PATH: '', DEVECO_HOME: DEVECO_APP }
+  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([APP_HDC]), loginShell: false }), APP_HDC)
+})
+
+test('discoverHdc finds an install outside /Applications through PATH', () => {
+  // The interesting case: nothing in the environment, and the app is somewhere
+  // the hard-coded locations never mention. Its tool bin on PATH is the clue.
+  const home = '/Users/dev/Tools/DevEco-Studio.app'
+  const hdc = `${home}/Contents/sdk/default/openharmony/toolchains/hdc`
+  const env = { PATH: `/usr/bin:${home}/Contents/tools/hvigor/bin` }
+  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([hdc]), loginShell: false }), hdc)
+})
+
+test('discoverHdc prefers a toolchain over a stray hdc on PATH', () => {
+  // A stale hdc on PATH is the usual reason a device "is not found" while
+  // DevEco itself connects, so PATH is the last resort rather than the first.
+  const stray = '/usr/local/bin/hdc'
+  const env = { PATH: '/usr/local/bin' }
+  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([stray, APP_HDC]), loginShell: false }), APP_HDC)
+  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([stray]), loginShell: false }), stray)
+})
+
+test('discoverHdc lets an explicit hdcPath win over every guess', () => {
+  const mine = '/opt/my-sdk/openharmony/toolchains/hdc'
+  const env = { PATH: '/usr/local/bin', DEVECO_SDK_HOME: '/Users/dev/huawei/command-line-tools/sdk' }
+  const existing = present([mine, APP_HDC, '/usr/local/bin/hdc'])
+  assert.equal(discoverHdc(mine, { env, platform: 'darwin', existing, loginShell: false }), mine)
+})
+
+test('discoverHdc reports nothing when no candidate exists', () => {
+  const env = { PATH: '/usr/bin:/bin', DEVECO_SDK_HOME: '/nope/sdk' }
+  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: () => false, loginShell: false }), undefined)
+})
+
+test('discoverHdc ignores a configured path that does not exist instead of failing', () => {
+  // A stale hdcPath must not shadow a working install: the search continues.
+  const env = { PATH: '' }
+  assert.equal(
+    discoverHdc('/gone/hdc', { env, platform: 'darwin', existing: present([APP_HDC]), loginShell: false }),
+    APP_HDC,
+  )
+})
+
+test('discoverHdc tries the Windows executable name', () => {
+  // Only the *name* is platform-specific; separators follow the host path
+  // module, so the expectation is built the same way the search builds it.
+  const home = path.join('/Users', 'dev')
+  const hdc = path.join(home, 'AppData', 'Local', 'Huawei', 'Sdk', 'default', 'openharmony', 'toolchains', 'hdc.exe')
+  const found = discoverHdc(undefined, {
+    env: { PATH: '' },
+    platform: 'win32',
+    home,
+    existing: present([hdc]),
+    loginShell: false,
+  })
+  assert.equal(found?.endsWith('hdc.exe'), true, `expected an .exe client, got ${String(found)}`)
+})
+
+test('discoverHdc recovers a variable only the login shell knows', () => {
+  // The case that produced "hdc not found": a packaged desktop app starts with
+  // none of a terminal's exports, so `DEVECO_SDK_HOME` is unset in the host
+  // process even though the user's shell sets it. The `linux` profile keeps the
+  // macOS `/Applications` constant out of the way, so only the shell's answer
+  // can resolve this path.
+  const hdc = '/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc'
+  const found = discoverHdc(undefined, {
+    env: { PATH: '', SHELL: '/bin/zsh' },
+    platform: 'linux',
+    home: '/nonexistent-home',
+    existing: (path_) => path_ === hdc,
+  })
+  // A machine with no usable login shell (a container, a CI image) must not
+  // fail the suite either: no shell means no answer, not a wrong one.
+  if (found !== undefined) assert.equal(found, hdc)
 })

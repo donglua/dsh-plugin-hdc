@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { registerTools } from '../lib/tools.js'
+import { registerTools, invalidateTargets } from '../lib/tools.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const fakeHdc = path.join(here, 'fake-hdc.sh')
@@ -29,6 +29,10 @@ async function harness({ mode = 'device', services = {} } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-e2e-'))
   process.env.DSH_HDC_FAKE_DIR = dir
   process.env.DSH_HDC_FAKE_MODE = mode
+  // The target cache is process-wide, which is right for a running Host and wrong
+  // for a suite where each test fakes a different attachment state: without this
+  // a `device` test's cached list would answer a later `empty` test.
+  invalidateTargets()
   const registered = new Map()
   const ctx = {
     tools: {
@@ -111,13 +115,17 @@ test('a screenshot becomes an image attachment and an image block', async () => 
 
     assert.equal(value.device, 'FakePhone123')
     assert.equal(value.image.attachmentId, 'att-fake')
-    assert.equal(value.image.mediaType, 'image/png')
+    // `snapshot_display` is the fast path and only writes JPEG: it rejects any
+    // suffix but `.jpeg`, so a capture that asks it for `.png` falls back to the
+    // slower `uitest screenCap` and its much larger PNG. The media type must
+    // follow the bytes, not the requested file name.
+    assert.equal(value.image.mediaType, 'image/jpeg')
     assert.equal(attachments.saved.length, 1, 'the image must be persisted before returning')
 
-    // The saved copy is the same PNG the attachment service received.
+    // The saved copy is the same JPEG the attachment service received.
     const onDisk = await readFile(savedPath)
     assert.deepEqual([...onDisk], [...attachments.saved[0].data])
-    assert.deepEqual([...onDisk.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    assert.deepEqual([...onDisk.subarray(0, 3)], [0xff, 0xd8, 0xff])
 
     const blocks = tool.output.render({}, value)
     assert.equal(blocks[1].type, 'image')
@@ -173,6 +181,53 @@ test('input builds the documented uitest commands', async () => {
     assert.equal((await tool.execute({ action: 'key', key: 'Back' }, exec())).command, 'keyEvent Back')
     assert.equal((await tool.execute({ action: 'text', text: 'hello world' }, exec())).command, "text 'hello world'")
   } finally {
+    await h.cleanup()
+  }
+})
+
+test('a burst of taps costs one device listing, not one per tap', async () => {
+  // Resolving the target used to spawn `hdc list targets` before every tap, so a
+  // tap cost two process spawns — the listing and the tap itself. The listing is
+  // the same answer within the moment it takes to tap twice, so it is reused
+  // briefly. This is the panel's hot path: the picture shows ~5 frames a second
+  // and each tap should not add a full round trip it does not need.
+  const h = await harness()
+  const log = path.join(h.dir, 'calls.log')
+  process.env.DSH_HDC_FAKE_LOG = log
+  try {
+    invalidateTargets()
+    const tool = h.tools.get('hdc_input')
+    await tool.execute({ action: 'click', x: 10, y: 20 }, exec())
+    await tool.execute({ action: 'click', x: 30, y: 40 }, exec())
+    await tool.execute({ action: 'click', x: 50, y: 60 }, exec())
+
+    const lines = (await readFile(log, 'utf8')).split('\n').filter(Boolean)
+    const listings = lines.filter((line) => line.startsWith('list '))
+    const taps = lines.filter((line) => line.includes('uiInput click'))
+    assert.equal(taps.length, 3, 'every tap must still reach the device')
+    assert.equal(listings.length, 1, `three taps must cost one listing, got ${listings.length}`)
+  } finally {
+    delete process.env.DSH_HDC_FAKE_LOG
+    await h.cleanup()
+  }
+})
+
+test('asking for the device list always asks the device, never the cache', async () => {
+  // The panel's refresh button and `hdc_devices` both mean "what is attached
+  // right now". A device plugged in a second ago must appear immediately, so
+  // these bypass the short-lived resolution cache entirely.
+  const h = await harness()
+  const log = path.join(h.dir, 'calls.log')
+  process.env.DSH_HDC_FAKE_LOG = log
+  try {
+    invalidateTargets()
+    await h.tools.get('hdc_devices').execute({}, exec())
+    await h.tools.get('hdc_devices').execute({}, exec())
+    const lines = (await readFile(log, 'utf8')).split('\n').filter(Boolean)
+    const listings = lines.filter((line) => line.startsWith('list '))
+    assert.equal(listings.length, 2, 'each listing must be a real device call')
+  } finally {
+    delete process.env.DSH_HDC_FAKE_LOG
     await h.cleanup()
   }
 })
