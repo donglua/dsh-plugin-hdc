@@ -554,3 +554,38 @@ test('a capture size must be given as a pair, never half of one', () => {
   assert.match(frameLoopScript({ maxFrames: 2, width: 480, height: 1060 }), /-w 480 -h 1060/u)
   assert.equal(frameLoopScript({ maxFrames: 2 }).includes('-w '), false)
 })
+
+test('a recording that fails on the filesystem leaves no temp frames behind', async () => {
+  // A full disk, a target whose parent is not a directory, or a frame that cannot
+  // be copied all used to leave the captured sequence in the system temp
+  // directory: the cleanup lived in the success and cancel branches only.
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-tempfix-'))
+  const previousDir = process.env.DSH_HDC_FAKE_DIR
+  const previousFrames = process.env.DSH_HDC_FAKE_FRAMES
+  process.env.DSH_HDC_FAKE_DIR = dir
+  process.env.DSH_HDC_FAKE_FRAMES = '3'
+  const before = new Set(await readdir(tmpdir()))
+  try {
+    // A file where the save path's parent should be: `mkdir` fails after the
+    // frames have already been written.
+    const blocker = path.join(dir, 'not-a-dir')
+    await writeFile(blocker, 'x')
+    await assert.rejects(
+      () => recordScreen(fakeHdc, 'FakePhone123', {
+        seconds: 1,
+        savePath: path.join(blocker, 'clip.mp4'),
+        ffmpegPath: undefined,
+      }),
+    )
+    const created = (await readdir(tmpdir())).filter((name) => name.startsWith('dsh-hdc-rec-') && !before.has(name))
+    assert.deepEqual(created, [], `a failed recording must not leave temp frames, found ${created.join(', ')}`)
+    // The blocker is untouched: the failure must not have removed the user's file.
+    assert.equal(await readFile(blocker, 'utf8'), 'x')
+  } finally {
+    if (previousDir === undefined) delete process.env.DSH_HDC_FAKE_DIR
+    else process.env.DSH_HDC_FAKE_DIR = previousDir
+    if (previousFrames === undefined) delete process.env.DSH_HDC_FAKE_FRAMES
+    else process.env.DSH_HDC_FAKE_FRAMES = previousFrames
+    await rm(dir, { recursive: true, force: true })
+  }
+})

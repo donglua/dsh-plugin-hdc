@@ -890,3 +890,28 @@ test('the picture refuses a swipe, so the browser never scrolls instead', () => 
   assert.match(drag, /pointer-events:none/u)
 })
 
+test('a press is acknowledged on the way down, before the gesture is known', async () => {
+  // Deciding tap-versus-swipe has to wait for the release, but *feedback* must
+  // not: the device's own reply is a later frame, and leaving the first ~0.4 s of
+  // every gesture unacknowledged reads as a press that did not land.
+  const { picture, image, reRender } = await pictureWithInputs()
+  picture.props.onPointerDown({ button: 0, pointerId: 1, clientX: 40, clientY: 80, currentTarget: image })
+  await settle()
+  const tree = reRender().tree
+  const marks = elementsOf(tree, 'hdci-ripple')
+  assert.equal(marks.length, 1, 'the press must leave a mark immediately')
+  assert.equal(marks[0].props.style.left, '40px')
+  assert.equal(marks[0].props.style.top, '80px')
+})
+
+test('a cancelled gesture takes its press mark with it', async () => {
+  // The mark claims an input. If the gesture was cancelled no input was sent, so
+  // leaving the mark would report something that never reached the device.
+  const { picture, image, reRender } = await pictureWithInputs()
+  picture.props.onPointerDown({ button: 0, pointerId: 1, clientX: 40, clientY: 80, currentTarget: image })
+  await settle()
+  picture.props.onPointerCancel({ pointerId: 1 })
+  await settle()
+  const tree = reRender().tree
+  assert.equal(elementsOf(tree, 'hdci-ripple').length, 0, 'a cancelled press leaves no mark behind')
+})
