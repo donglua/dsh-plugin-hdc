@@ -399,7 +399,7 @@ test('a tap is queued, never dropped while another is in flight', () => {
   assert.ok(handler.length > 200, 'the sliced handler must be the real one, not an empty tail')
   assert.equal(/if \(device === null \|\| inputBusy\) return/u.test(handler), false, 'the press handler must not drop a tap')
   // Input must go through a queue that drains in order.
-  assert.match(source, /const queueRef = useRef\(\{ device: null, items: \[\], running: false \}\)/u)
+  assert.match(source, /const queueRef = useRef\(\{ device: null, generation: 0, items: \[\], running: false, controller: null \}\)/u)
   assert.match(source, /queue\.items\.push\(\{ payload, done, device \}\)/u)
   assert.match(source, /const item = queue\.items\.shift\(\)/u)
 })
@@ -776,15 +776,29 @@ test('a drag past the threshold is sent as a swipe, in device pixels', async () 
   gesture({ x: 10, y: 20 }, { x: 60, y: 150 })
   await settle()
   assert.equal(inputCalls.length, 1, 'a drag must send exactly one input')
-  assert.deepEqual(inputCalls[0], {
-    device: 'phone-1',
-    action: 'swipe',
-    x: 10,
-    y: 20,
-    to_x: 60,
-    to_y: 150,
-    duration_ms: 600,
-  })
+  const [call] = inputCalls
+  assert.equal(call.device, 'phone-1')
+  assert.equal(call.action, 'swipe')
+  assert.equal(call.x, 10)
+  assert.equal(call.y, 20)
+  assert.equal(call.to_x, 60)
+  assert.equal(call.to_y, 150)
+  // The duration follows how long the gesture took, clamped to a usable range,
+  // so a flick stays a flick instead of becoming a slow drag.
+  assert.ok(Number.isInteger(call.duration_ms), 'the swipe must carry an integer duration')
+  assert.ok(call.duration_ms >= 120 && call.duration_ms <= 1200, `duration out of range: ${call.duration_ms}`)
+})
+
+test('a swipe keeps the speed it was made at, within the device range', async () => {
+  // A fixed duration makes every gesture feel identical: a quick flick is
+  // replayed as a slow drag, which a list scrolls a shorter distance for.
+  const source = readFileSync(clientPath, 'utf8')
+  assert.match(source, /duration_ms: clampDuration\(Date\.now\(\) - gesture\.startedAt\)/u)
+  assert.match(source, /const SWIPE_MIN_DURATION_MS = 120/u)
+  assert.match(source, /const SWIPE_MAX_DURATION_MS = 1200/u)
+  // A gesture that never ended still has to name something usable.
+  const helper = source.slice(source.indexOf('function clampDuration('), source.indexOf('// ── styles'))
+  assert.match(helper, /Number\.isFinite/u, 'a missing elapsed time must fall back')
 })
 
 test('a press that stays put is still sent as a tap, on release', async () => {
