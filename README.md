@@ -93,7 +93,7 @@ absolute path.
 | Tool | What it does |
 |---|---|
 | `hdc_devices` | List attached connect keys. Every other tool takes one as `device`. |
-| `hdc_screenshot` | Capture the screen and return the image itself. `save_path` also keeps a PNG. |
+| `hdc_screenshot` | Capture the screen and return the image itself. `save_path` also keeps a copy, named for the format the device produced (JPEG, or PNG when the capture had to fall back). |
 | `hdc_input` | `click`, `doubleClick`, `longClick`, `swipe`, `drag`, `fling`, `text`, `key` via `uitest uiInput`. |
 | `hdc_ui_tree` | `uitest dumpLayout`, reported as type, text, bounds, and the center point to tap. |
 | `hdc_app` | `install`, `uninstall`, `start`, `stop`, `current`, `list`. |

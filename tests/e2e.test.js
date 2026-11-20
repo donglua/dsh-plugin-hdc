@@ -110,7 +110,7 @@ test('a screenshot becomes an image attachment and an image block', async () => 
   const h = await harness({ services: { attachments } })
   try {
     const tool = h.tools.get('hdc_screenshot')
-    const savedPath = path.join(h.dir, 'shot.png')
+    // Asked for `.png`, but the fast capture path only ever writes JPEG.
     const value = await tool.execute({ save_path: 'shot.png' }, exec())
 
     assert.equal(value.device, 'FakePhone123')
@@ -122,10 +122,14 @@ test('a screenshot becomes an image attachment and an image block', async () => 
     assert.equal(value.image.mediaType, 'image/jpeg')
     assert.equal(attachments.saved.length, 1, 'the image must be persisted before returning')
 
-    // The saved copy is the same JPEG the attachment service received.
-    const onDisk = await readFile(savedPath)
+    // The saved copy is the same JPEG the attachment service received, and its
+    // name says so: `shot.png` holding JPEG bytes is a file a downstream reader
+    // decodes with the wrong decoder, so the extension follows the content.
+    assert.equal(value.savedPath, path.join(h.dir, 'shot.jpg'), 'the extension must match the captured format')
+    const onDisk = await readFile(value.savedPath)
     assert.deepEqual([...onDisk], [...attachments.saved[0].data])
     assert.deepEqual([...onDisk.subarray(0, 3)], [0xff, 0xd8, 0xff])
+    await assert.rejects(() => readFile(path.join(h.dir, 'shot.png')), 'no mislabelled copy may be left behind')
 
     const blocks = tool.output.render({}, value)
     assert.equal(blocks[1].type, 'image')
