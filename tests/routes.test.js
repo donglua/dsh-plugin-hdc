@@ -730,3 +730,45 @@ test('a query integer that overflows is refused instead of reaching the device',
   assert.match(res.json().error.message, /out of range/u)
   assert.equal(fake.calls.length, 0)
 })
+
+test('a malformed percent-escape in a path parameter is a 400, not a 500', async () => {
+  const handler = createHandler({ services: services() })
+  for (const path of ['/hdc/artifact/%', '/hdc/artifact/%zz']) {
+    const res = await call(handler, path)
+    assert.equal(res.statusCode, 400, `${path} must be a caller error`)
+    assert.equal(res.json().error.code, 'HDC_BAD_ARGS')
+  }
+})
+
+test('an artifact id reaches the handler decoded, exactly as it was minted', async () => {
+  // The handler used to re-slice the raw URL, so a legitimately encoded id never
+  // matched the registry entry the Host itself had created. Driven over a real
+  // HTTP server, because streaming a file needs a real writable response.
+  const { remember, clear } = await import('../lib/artifacts.js')
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { createServer } = await import('node:http')
+  const path = await import('node:path')
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-artifact-'))
+  const handler = createHandler({ services: services() })
+  const server = createServer((req, res) => { void handler(req, res) })
+  try {
+    const file = path.join(dir, 'shot.png')
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    await writeFile(file, bytes)
+    const id = remember({ path: file, mediaType: 'image/png', name: 'shot.png', kind: 'screenshot' })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address()
+    const response = await fetch(`http://127.0.0.1:${port}/hdc/artifact/${encodeURIComponent(id)}`)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('content-type'), 'image/png')
+    assert.deepEqual([...Buffer.from(await response.arrayBuffer())], [...bytes], 'the file must be served, not a 404')
+    clear()
+  } finally {
+    // `close` waits for keep-alive sockets the fetch left open; give them up
+    // immediately so the suite does not spend its idle timeout here.
+    server.closeAllConnections?.()
+    await new Promise((resolve) => server.close(resolve))
+    await rm(dir, { recursive: true, force: true })
+  }
+})
