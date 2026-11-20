@@ -30,11 +30,27 @@ const clientPath = path.join(here, '..', 'lib', 'client.js')
  *
  * State survives across renders, which is what makes a multi-step scenario
  * meaningful: render, flush the effects, render again against the new state.
+ *
+ * Two behaviours matter for anything beyond a first paint, and both are what a
+ * real renderer does:
+ *
+ * - `useEffect` compares its dependency array with the previous render's and
+ *   only re-runs when it changed, so an effect cannot re-fire merely because
+ *   the component re-rendered.
+ * - a re-run's cleanup is called *before* the new body, so a stale timer or
+ *   listener is released at the moment its effect is replaced rather than
+ *   accumulating until unmount.
+ *
+ * Without either, a scenario that re-renders drives every effect on every
+ * paint: the panel would re-request its device list on each state write, and a
+ * test could pass over code that never behaves that way in a browser.
  */
 function createReact() {
   const slots = []
   let cursor = 0
   let effects = []
+  /** Previous dependency array and cleanup, per effect slot. */
+  const effectSlots = []
   const React = {
     createElement(type, props, ...children) {
       return {
@@ -65,16 +81,25 @@ function createReact() {
       cursor += 1
       return fn()
     },
-    useEffect(fn) {
+    useEffect(fn, deps) {
+      const index = cursor
       cursor += 1
-      effects.push(fn)
+      const previous = effectSlots[index]
+      const changed = previous === undefined
+        || deps === undefined
+        || previous.deps === undefined
+        || deps.length !== previous.deps.length
+        || deps.some((value, position) => !Object.is(value, previous.deps[position]))
+      if (!changed) return
+      effects.push({ index, fn, deps })
     },
   }
   const cleanups = []
   return {
     React,
     /**
-     * Render once and then run that render's effects, the way a mount does.
+     * Render once and then run the effects whose dependencies changed, the way a
+     * commit does.
      *
      * The hook cursor resets but the state slots keep their values, so a test
      * can render, await the request an effect started, and render again against
@@ -84,14 +109,20 @@ function createReact() {
       cursor = 0
       effects = []
       const tree = component(props)
-      for (const effect of effects) {
-        const cleanup = effect()
-        if (typeof cleanup === 'function') cleanups.push(cleanup)
+      for (const entry of effects) {
+        const previous = effectSlots[entry.index]
+        if (typeof previous?.cleanup === 'function') previous.cleanup()
+        const cleanup = entry.fn()
+        effectSlots[entry.index] = { deps: entry.deps, cleanup: typeof cleanup === 'function' ? cleanup : undefined }
       }
       return { tree, effects }
     },
     /** Run every cleanup an earlier render returned. */
     unmount() {
+      for (const entry of effectSlots) {
+        if (typeof entry?.cleanup === 'function') entry.cleanup()
+      }
+      effectSlots.length = 0
       for (const cleanup of cleanups.splice(0)) cleanup()
     },
   }
@@ -436,4 +467,66 @@ test('the tap mark stays visible even without the host theme tokens', () => {
   assert.match(rule, /pointer-events:none/u, 'the mark must not swallow the next tap')
   // A reduced-motion preference must still show something.
   assert.match(css, /prefers-reduced-motion:reduce\)\{\.hdci-ripple\{animation:none/u)
+})
+
+// ── a read that belongs to the device it was made for ──────────────────────
+// The panel shows one device at a time, and a dump started on one must never be
+// rendered under another: every row is a tap, so a stale tree is not a cosmetic
+// mismatch — it aims a tap at a control from a screen the user is not looking
+// at. These drive the real component with a deferred fetch to pin the ordering.
+
+test('a UI tree that arrives after a device switch is never rendered tappable', async () => {
+  // Every row in the UI tree is a tap aimed at a device pixel. A dump started on
+  // the previous device therefore cannot be shown under the current one: the
+  // user would press a control from a screen that is not on display. The trap is
+  // ordering — the old reply lands after the switch — so the second device's own
+  // dump is deliberately left pending, which is exactly the window where a stale
+  // tree would otherwise be the only thing to render.
+  const pending = []
+  const { pages, react } = loadClient(async (url) => {
+    const pathname = String(url).split('?')[0]
+    if (pathname === '/hdc/devices') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-a', 'phone-b'] }) } } }
+    }
+    // Every device read hangs until the test releases it, which is what lets a
+    // reply from the previous device arrive after the switch.
+    return new Promise((resolve) => { pending.push({ url: String(url), resolve }) })
+  })
+  const page = pages[0].component
+  react.render(page, { t: (key) => key })
+  await settle()
+  let { tree } = react.render(page, { t: (key) => key })
+
+  // Open the UI card so its effect asks for a dump of the first device.
+  elementsOf(tree, 'hdci-card-toggle')[0].props.onClick()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+  await settle()
+  assert.ok(pending.some((entry) => entry.url.includes('device=phone-a')), 'the first device must be the one being dumped')
+
+  // Switch to the second device before the first dump answers.
+  elementsOf(tree, 'hdci-select')[0].props.onChange({ target: { value: 'phone-b' } })
+  ;({ tree } = react.render(page, { t: (key) => key }))
+  await settle()
+
+  // Release only the first device's reply; the second stays in flight.
+  const stale = pending.findIndex((entry) => entry.url.includes('device=phone-a'))
+  assert.ok(stale >= 0, 'the first device request must still be in flight')
+  const [answered] = pending.splice(stale, 1)
+  answered.resolve({
+    ok: true,
+    status: 200,
+    clone: () => ({
+      json: async () => ({ device: 'phone-a', content: 'Button "Old" clickable @ [0,0][10x10] tap (5, 5)', truncated: false }),
+    }),
+  })
+  await settle()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+  await settle()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+
+  // No tappable row may carry the old device's point, and none of its text may
+  // be presented as the current screen.
+  const rows = elementsOf(tree, 'hdci-treerow')
+  assert.equal(rows.length, 0, 'a dump for another device must not be rendered as rows')
+  assert.equal(textOf(tree).join(' ').includes('Button "Old"'), false, 'the old device text must not be shown')
 })
