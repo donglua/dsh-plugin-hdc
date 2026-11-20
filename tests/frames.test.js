@@ -17,6 +17,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
+  captureFrame,
   discoverFfmpeg,
   frameLoopScript,
   imageSize,
@@ -409,6 +410,51 @@ test('a recording ends on its deadline even when the device stops producing', as
     clearTimeout(watchdog)
     const elapsed = Date.now() - started
     assert.ok(elapsed < 25_000, `a stalled device must end the call, took ${elapsed} ms`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('two captures at once do not share a remote scratch directory', async () => {
+  // Each loop removes its directory on the way in and again on the way out, so
+  // a shared name means the second start deletes the first run's frames and the
+  // first finish deletes the second's. A second live stream, or a screenshot
+  // taken while a recording runs, is enough to hit it.
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-concurrent-'))
+  try {
+    const spy = path.join(dir, 'spy.sh')
+    // Both captures exit without a frame, which is enough: what matters is the
+    // script each one was handed, and an early exit cannot interleave two runs'
+    // writes to a shared log the way a frame-producing loop could.
+    await writeFile(spy, [
+      '#!/bin/sh',
+      // `-t <serial> shell <script>`: drop all three so `$1` is the script.
+      'shift 3 2>/dev/null || true',
+      // One file per script, named by a checksum of its own text, so the two
+      // concurrent runs cannot overwrite each other's record.
+      'sum=$(printf %s "$1" | cksum | cut -d" " -f1)',
+      `printf '%s' "$1" > "${dir}/script-$sum.txt"`,
+      'exit 0',
+      '',
+    ].join('\n'))
+    chmodSync(spy, 0o755)
+
+    const outcomes = await Promise.allSettled([
+      captureFrame(spy, 'FakePhone123'),
+      captureFrame(spy, 'FakePhone123'),
+    ])
+    for (const outcome of outcomes) assert.equal(outcome.status, 'rejected', 'the stand-in produced no frame')
+
+    const names = (await readdir(dir)).filter((name) => name.startsWith('script-'))
+    assert.equal(names.length, 2, 'each capture must have run its own script')
+    const dirs = []
+    for (const name of names) {
+      const script = await readFile(path.join(dir, name), 'utf8')
+      const chosen = /^d=(\S+)$/mu.exec(script)?.[1]
+      assert.ok(chosen !== undefined, 'each script names the directory it works in')
+      dirs.push(chosen)
+    }
+    assert.notEqual(dirs[0], dirs[1], 'concurrent captures must not share one remote directory')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
