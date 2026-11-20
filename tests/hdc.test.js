@@ -9,15 +9,19 @@
  */
 
 import assert from 'node:assert/strict'
+import { chmodSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import {
   clip,
   discoverHdc,
+  forgetLoginShellCache,
   parseTargets,
   selectDevice,
-  sniffImageMediaType,
   shq,
+  sniffImageMediaType,
 } from '../lib/hdc.js'
 import { summarizeLayout, outlineLayout, readRect, readBoundsString, formatLayoutNode } from '../lib/tools.js'
 
@@ -228,74 +232,74 @@ function present(paths) {
 const DEVECO_APP = '/Applications/DevEco-Studio.app'
 const APP_HDC = `${DEVECO_APP}/Contents/sdk/default/openharmony/toolchains/hdc`
 
-test('discoverHdc finds the layout a current DevEco actually ships', () => {
+test('discoverHdc finds the layout a current DevEco actually ships', async () => {
   // `default/` is the level that a pre-`default` layout missed entirely, which
   // is what made an installed DevEco report "hdc not found".
-  assert.equal(discoverHdc(undefined, { env: { PATH: '' }, platform: 'darwin', existing: present([APP_HDC]), loginShell: false }), APP_HDC)
+  assert.equal(await discoverHdc(undefined, { env: { PATH: '' }, platform: 'darwin', existing: present([APP_HDC]), loginShell: false }), APP_HDC)
 })
 
-test('discoverHdc honours DEVECO_SDK_HOME, which points at the sdk directory', () => {
+test('discoverHdc honours DEVECO_SDK_HOME, which points at the sdk directory', async () => {
   const hdc = '/Users/dev/huawei/command-line-tools/sdk/default/openharmony/toolchains/hdc'
   const env = { PATH: '', DEVECO_SDK_HOME: '/Users/dev/huawei/command-line-tools/sdk' }
-  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([hdc]), loginShell: false }), hdc)
+  assert.equal(await discoverHdc(undefined, { env, platform: 'darwin', existing: present([hdc]), loginShell: false }), hdc)
 })
 
-test('discoverHdc reads TOOL_HOME as the directory holding sdk', () => {
+test('discoverHdc reads TOOL_HOME as the directory holding sdk', async () => {
   const hdc = '/Users/dev/huawei/command-line-tools/sdk/default/openharmony/toolchains/hdc'
   const env = { PATH: '', TOOL_HOME: '/Users/dev/huawei/command-line-tools' }
-  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([hdc]), loginShell: false }), hdc)
+  assert.equal(await discoverHdc(undefined, { env, platform: 'darwin', existing: present([hdc]), loginShell: false }), hdc)
 })
 
-test('discoverHdc reads a DevEco bundle root from DEVECO_HOME', () => {
+test('discoverHdc reads a DevEco bundle root from DEVECO_HOME', async () => {
   const env = { PATH: '', DEVECO_HOME: DEVECO_APP }
-  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([APP_HDC]), loginShell: false }), APP_HDC)
+  assert.equal(await discoverHdc(undefined, { env, platform: 'darwin', existing: present([APP_HDC]), loginShell: false }), APP_HDC)
 })
 
-test('discoverHdc finds an install outside /Applications through PATH', () => {
+test('discoverHdc finds an install outside /Applications through PATH', async () => {
   // The interesting case: nothing in the environment, and the app is somewhere
   // the hard-coded locations never mention. Its tool bin on PATH is the clue.
   const home = '/Users/dev/Tools/DevEco-Studio.app'
   const hdc = `${home}/Contents/sdk/default/openharmony/toolchains/hdc`
   const env = { PATH: `/usr/bin:${home}/Contents/tools/hvigor/bin` }
-  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([hdc]), loginShell: false }), hdc)
+  assert.equal(await discoverHdc(undefined, { env, platform: 'darwin', existing: present([hdc]), loginShell: false }), hdc)
 })
 
-test('discoverHdc prefers a toolchain over a stray hdc on PATH', () => {
+test('discoverHdc prefers a toolchain over a stray hdc on PATH', async () => {
   // A stale hdc on PATH is the usual reason a device "is not found" while
   // DevEco itself connects, so PATH is the last resort rather than the first.
   const stray = '/usr/local/bin/hdc'
   const env = { PATH: '/usr/local/bin' }
-  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([stray, APP_HDC]), loginShell: false }), APP_HDC)
-  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: present([stray]), loginShell: false }), stray)
+  assert.equal(await discoverHdc(undefined, { env, platform: 'darwin', existing: present([stray, APP_HDC]), loginShell: false }), APP_HDC)
+  assert.equal(await discoverHdc(undefined, { env, platform: 'darwin', existing: present([stray]), loginShell: false }), stray)
 })
 
-test('discoverHdc lets an explicit hdcPath win over every guess', () => {
+test('discoverHdc lets an explicit hdcPath win over every guess', async () => {
   const mine = '/opt/my-sdk/openharmony/toolchains/hdc'
   const env = { PATH: '/usr/local/bin', DEVECO_SDK_HOME: '/Users/dev/huawei/command-line-tools/sdk' }
   const existing = present([mine, APP_HDC, '/usr/local/bin/hdc'])
-  assert.equal(discoverHdc(mine, { env, platform: 'darwin', existing, loginShell: false }), mine)
+  assert.equal(await discoverHdc(mine, { env, platform: 'darwin', existing, loginShell: false }), mine)
 })
 
-test('discoverHdc reports nothing when no candidate exists', () => {
+test('discoverHdc reports nothing when no candidate exists', async () => {
   const env = { PATH: '/usr/bin:/bin', DEVECO_SDK_HOME: '/nope/sdk' }
-  assert.equal(discoverHdc(undefined, { env, platform: 'darwin', existing: () => false, loginShell: false }), undefined)
+  assert.equal(await discoverHdc(undefined, { env, platform: 'darwin', existing: () => false, loginShell: false }), undefined)
 })
 
-test('discoverHdc ignores a configured path that does not exist instead of failing', () => {
+test('discoverHdc ignores a configured path that does not exist instead of failing', async () => {
   // A stale hdcPath must not shadow a working install: the search continues.
   const env = { PATH: '' }
   assert.equal(
-    discoverHdc('/gone/hdc', { env, platform: 'darwin', existing: present([APP_HDC]), loginShell: false }),
+    await discoverHdc('/gone/hdc', { env, platform: 'darwin', existing: present([APP_HDC]), loginShell: false }),
     APP_HDC,
   )
 })
 
-test('discoverHdc tries the Windows executable name', () => {
+test('discoverHdc tries the Windows executable name', async () => {
   // Only the *name* is platform-specific; separators follow the host path
   // module, so the expectation is built the same way the search builds it.
   const home = path.join('/Users', 'dev')
   const hdc = path.join(home, 'AppData', 'Local', 'Huawei', 'Sdk', 'default', 'openharmony', 'toolchains', 'hdc.exe')
-  const found = discoverHdc(undefined, {
+  const found = await discoverHdc(undefined, {
     env: { PATH: '' },
     platform: 'win32',
     home,
@@ -305,14 +309,14 @@ test('discoverHdc tries the Windows executable name', () => {
   assert.equal(found?.endsWith('hdc.exe'), true, `expected an .exe client, got ${String(found)}`)
 })
 
-test('discoverHdc recovers a variable only the login shell knows', () => {
+test('discoverHdc recovers a variable only the login shell knows', async () => {
   // The case that produced "hdc not found": a packaged desktop app starts with
   // none of a terminal's exports, so `DEVECO_SDK_HOME` is unset in the host
   // process even though the user's shell sets it. The `linux` profile keeps the
   // macOS `/Applications` constant out of the way, so only the shell's answer
   // can resolve this path.
   const hdc = '/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc'
-  const found = discoverHdc(undefined, {
+  const found = await discoverHdc(undefined, {
     env: { PATH: '', SHELL: '/bin/zsh' },
     platform: 'linux',
     home: '/nonexistent-home',
@@ -321,4 +325,38 @@ test('discoverHdc recovers a variable only the login shell knows', () => {
   // A machine with no usable login shell (a container, a CI image) must not
   // fail the suite either: no shell means no answer, not a wrong one.
   if (found !== undefined) assert.equal(found, hdc)
+})
+
+test('a slow login shell does not block the event loop', async () => {
+  // The probe runs on the request path whenever the earlier stages come up empty.
+  // Done synchronously it stopped the entire Host — every other request and tool
+  // call — for as long as an interactive shell took to start.
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-shell-'))
+  try {
+    // Named `bash` on purpose: the probe only trusts a shell it recognises, so a
+    // stand-in with any other basename would be skipped and prove nothing.
+    const shell = path.join(dir, 'bash')
+    // A shell that takes a moment and then answers nothing useful.
+    await writeFile(shell, ['#!/bin/sh', 'sleep 0.3', 'exit 0', ''].join('\n'))
+    chmodSync(shell, 0o755)
+
+    // The cache is process-wide, so an earlier test's empty answer would make
+    // this pass without ever running the shell.
+    forgetLoginShellCache()
+    let ticks = 0
+    const timer = setInterval(() => { ticks += 1 }, 20)
+    const started = Date.now()
+    const found = await discoverHdc(undefined, {
+      env: { PATH: '', SHELL: shell },
+      platform: 'darwin',
+      existing: () => false,
+    })
+    const elapsed = Date.now() - started
+    clearInterval(timer)
+    assert.equal(found, undefined, 'no client exists, so the search reports nothing')
+    // A blocking probe would freeze the timer for its whole duration.
+    assert.ok(ticks >= 3, `the event loop must keep running during the probe, saw ${ticks} ticks in ${elapsed} ms`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
