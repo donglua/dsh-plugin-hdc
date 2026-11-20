@@ -459,3 +459,82 @@ test('two captures at once do not share a remote scratch directory', async () =>
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a screenshot stops its capture when the caller cancels', async () => {
+  // The route hands the disconnect signal to the capture, and a panel that
+  // navigated away must not leave a grab running on the device.
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-cancel-shot-'))
+  try {
+    const stalled = path.join(dir, 'stalled.sh')
+    await writeFile(stalled, ['#!/bin/sh', 'sleep 60', ''].join('\n'))
+    chmodSync(stalled, 0o755)
+
+    const controller = new AbortController()
+    const pending = captureFrame(stalled, 'FakePhone123', { signal: controller.signal, timeoutMs: 60_000 })
+    setTimeout(() => controller.abort(), 50)
+    const started = Date.now()
+    await assert.rejects(pending, (error) => error.code === 'HDC_RECORD_CANCELLED')
+    assert.ok(Date.now() - started < 10_000, 'an abort must end the capture promptly')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a screenshot reports a device that never produces a frame', async () => {
+  // A device that accepts the connection and then goes quiet used to hold the
+  // capture open for as long as its process lived.
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-shot-timeout-'))
+  try {
+    const stalled = path.join(dir, 'stalled.sh')
+    await writeFile(stalled, ['#!/bin/sh', 'sleep 60', ''].join('\n'))
+    chmodSync(stalled, 0o755)
+    const started = Date.now()
+    await assert.rejects(
+      () => captureFrame(stalled, 'FakePhone123', { timeoutMs: 300 }),
+      (error) => error.code === 'HDC_SCREENSHOT_FAILED',
+    )
+    assert.ok(Date.now() - started < 10_000, 'the capture deadline must end the wait')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('cancelling during encoding discards the file instead of finishing it', async () => {
+  // Encoding is the slowest step after the capture. Cancelling then used to let
+  // ffmpeg run to completion and still leave a video the caller abandoned.
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-cancel-enc-'))
+  const previousDir = process.env.DSH_HDC_FAKE_DIR
+  const previousFrames = process.env.DSH_HDC_FAKE_FRAMES
+  process.env.DSH_HDC_FAKE_DIR = dir
+  process.env.DSH_HDC_FAKE_FRAMES = '3'
+  try {
+    const slow = path.join(dir, 'slow-ffmpeg.sh')
+    // Ignores its arguments, waits, and writes something that is not a video:
+    // what matters is that the process is still running when the cancel lands.
+    await writeFile(slow, ['#!/bin/sh', 'sleep 30', 'exit 0', ''].join('\n'))
+    chmodSync(slow, 0o755)
+
+    const savePath = path.join(dir, 'clip.mp4')
+    const controller = new AbortController()
+    const pending = recordScreen(fakeHdc, 'FakePhone123', {
+      seconds: 1,
+      savePath,
+      ffmpegPath: slow,
+      signal: controller.signal,
+    })
+    // Let the capture finish, then cancel while the encoder is running.
+    setTimeout(() => controller.abort(), 150)
+    const started = Date.now()
+    await assert.rejects(pending, (error) => error.code === 'HDC_RECORD_CANCELLED')
+    assert.ok(Date.now() - started < 20_000, 'a cancel during encoding must end the call')
+    await assert.rejects(() => readFile(savePath), 'no video may be left behind')
+    const leftovers = (await readdir(dir)).filter((name) => name.endsWith('.mp4') || name.includes('clip-frames'))
+    assert.deepEqual(leftovers, [], `a cancel must leave no artifact, found ${leftovers.join(', ')}`)
+  } finally {
+    if (previousDir === undefined) delete process.env.DSH_HDC_FAKE_DIR
+    else process.env.DSH_HDC_FAKE_DIR = previousDir
+    if (previousFrames === undefined) delete process.env.DSH_HDC_FAKE_FRAMES
+    else process.env.DSH_HDC_FAKE_FRAMES = previousFrames
+    await rm(dir, { recursive: true, force: true })
+  }
+})
