@@ -19,7 +19,7 @@ import {
   sniffImageMediaType,
   shq,
 } from '../lib/hdc.js'
-import { summarizeLayout, readRect, readBoundsString, formatLayoutNode } from '../lib/tools.js'
+import { summarizeLayout, outlineLayout, readRect, readBoundsString, formatLayoutNode } from '../lib/tools.js'
 
 test('parseTargets drops the empty marker and banner lines', () => {
   assert.deepEqual(parseTargets('[Empty]\n'), [])
@@ -146,6 +146,72 @@ test('layout parsing survives a non-JSON dump', () => {
 test('layout rendering names bounds and the tap point', () => {
   const line = formatLayoutNode({ type: 'Button', text: 'Next', x: 84, y: 1127, width: 1088, height: 168, clickable: true })
   assert.match(line, /^Button "Next" clickable @ \[84,1127\]\[1088x168\] tap \(628, 1211\)$/u)
+})
+
+test('the outline keeps a node inside the ancestor the filter kept', () => {
+  // A labeled Text sits under two containers that the default filter drops. The
+  // outline must place it inside whatever *was* kept above it, not at depth 3:
+  // the raw depth of a real dump puts most controls twenty levels down, and a
+  // tree drawn at that depth is empty indentation.
+  const document = {
+    attributes: { bounds: '[0,0][1260,2720]', type: 'Root' },
+    children: [
+      {
+        attributes: { bounds: '[0,0][1260,2720]', type: 'Column' },
+        children: [
+          {
+            attributes: { bounds: '[0,0][1260,2720]', type: 'Stack' },
+            children: [
+              { attributes: { bounds: '[84,1127][1172,1295]', type: 'Button', text: 'Next', clickable: 'true' }, children: [] },
+            ],
+          },
+          { attributes: { bounds: '[10,10][20,20]', type: 'Image', clickable: 'true' }, children: [] },
+        ],
+      },
+    ],
+  }
+  const nodes = summarizeLayout(JSON.stringify(document))
+  const shown = nodes.filter((node) => node.text !== undefined || node.clickable)
+  const rows = outlineLayout(nodes, shown)
+
+  // Root is kept (it carries an id-like type label? no — it has no text), so the
+  // first kept node is the Column's absence: both controls are direct children
+  // of the root in the outline.
+  assert.deepEqual(rows.map((row) => [row.depth, row.type]), [[0, 'Button'], [0, 'Image']])
+  // Root has no text and is not clickable, so it is dropped too; the outline has
+  // no parent to report for these two.
+  assert.equal(rows.every((row) => row.hasChildren === false), true)
+  assert.deepEqual(rows[0].tap, { x: 628, y: 1211 })
+})
+
+test('the outline reports a kept parent, its children, and their depth', () => {
+  // `all_nodes` keeps the containers, which is what makes a caret meaningful:
+  // the outline must mark the containers that actually have something under
+  // them, and place each child one level deeper than its parent.
+  const document = {
+    attributes: { bounds: '[0,0][100,100]', type: 'Root' },
+    children: [
+      {
+        attributes: { bounds: '[0,0][100,50]', type: 'Column' },
+        children: [
+          { attributes: { bounds: '[0,0][50,25]', type: 'Text', text: 'A', clickable: 'false' }, children: [] },
+          { attributes: { bounds: '[50,0][100,25]', type: 'Text', text: 'B', clickable: 'false' }, children: [] },
+        ],
+      },
+      { attributes: { bounds: '[0,50][100,100]', type: 'Text', text: 'Loose', clickable: 'false' }, children: [] },
+    ],
+  }
+  const nodes = summarizeLayout(JSON.stringify(document))
+  const rows = outlineLayout(nodes, nodes)
+  assert.deepEqual(rows.map((row) => [row.depth, row.type, row.hasChildren]), [
+    [0, 'Root', true],
+    [1, 'Column', true],
+    [2, 'Text', false],
+    [2, 'Text', false],
+    [1, 'Text', false],
+  ])
+  // Every row is tappable: the centre of its own bounds, in device pixels.
+  assert.deepEqual(rows[2].tap, { x: 25, y: 12 })
 })
 
 // ── client discovery ────────────────────────────────────────────────────────

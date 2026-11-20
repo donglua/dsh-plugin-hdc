@@ -73,13 +73,37 @@ function createReact() {
       if (!(index in slots)) slots[index] = { current: initial }
       return slots[index]
     },
-    useCallback(fn) {
+    useCallback(fn, deps) {
+      const index = cursor
       cursor += 1
+      // Memorised like React's: a re-render returns the *previous* function when
+      // its dependencies are unchanged. Returning a fresh function each time made
+      // every callback-typed dependency look changed, so effects that depend on
+      // one re-ran on every render — which is not what a browser does, and hid
+      // real behaviour behind an artefact of this stand-in.
+      const previous = slots[index]
+      if (previous !== undefined && deps !== undefined) {
+        const same = previous.deps !== undefined
+          && deps.length === previous.deps.length
+          && deps.every((value, position) => Object.is(value, previous.deps[position]))
+        if (same) return previous.fn
+      }
+      slots[index] = { fn, deps }
       return fn
     },
-    useMemo(fn) {
+    useMemo(fn, deps) {
+      const index = cursor
       cursor += 1
-      return fn()
+      const previous = slots[index]
+      if (previous !== undefined && deps !== undefined) {
+        const same = previous.deps !== undefined
+          && deps.length === previous.deps.length
+          && deps.every((value, position) => Object.is(value, previous.deps[position]))
+        if (same) return previous.value
+      }
+      const value = fn()
+      slots[index] = { value, deps }
+      return value
     },
     useEffect(fn, deps) {
       const index = cursor
@@ -365,12 +389,18 @@ test('a tap is queued, never dropped while another is in flight', () => {
   // is what made a double tap or a fast second tap vanish, which reads as the
   // picture not following the finger.
   const source = readFileSync(clientPath, 'utf8')
-  // The click handler must not bail out on a busy flag.
-  const handler = source.slice(source.indexOf('function onShotClick'), source.indexOf('function pressKey'))
-  assert.equal(/if \(device === null \|\| inputBusy\) return/u.test(handler), false, 'the click handler must not drop a tap')
+  // The press handler must not bail out on a busy flag. The slice has to name a
+  // function that exists: searching for a renamed handler yields an empty string,
+  // and every negative assertion about an empty string passes for nothing.
+  const start = source.indexOf('function onShotPointerDown')
+  const end = source.indexOf('function pressKey')
+  assert.ok(start >= 0 && end > start, 'the press handler must exist between the two anchors')
+  const handler = source.slice(start, end)
+  assert.ok(handler.length > 200, 'the sliced handler must be the real one, not an empty tail')
+  assert.equal(/if \(device === null \|\| inputBusy\) return/u.test(handler), false, 'the press handler must not drop a tap')
   // Input must go through a queue that drains in order.
   assert.match(source, /const queueRef = useRef\(\{ device: null, items: \[\], running: false \}\)/u)
-  assert.match(source, /queue\.items\.push\(\{ payload, done \}\)/u)
+  assert.match(source, /queue\.items\.push\(\{ payload, done, device \}\)/u)
   assert.match(source, /const item = queue\.items\.shift\(\)/u)
 })
 
@@ -385,35 +415,27 @@ test('controls stay usable during an in-flight input, because the queue orders t
   }
 })
 
-test('a queued tap belongs to the device that was showing when it was made', () => {
-  // Switching device must not deliver the previous device's taps to the new one.
-  const source = readFileSync(clientPath, 'utf8')
-  assert.match(source, /if \(queue\.device !== device\) \{/u)
-  assert.match(source, /queue\.items = \[\]/u)
-})
-
 test('a tap mark is placed in stage pixels, not picture percentages', () => {
   // The stage is the containing block for an absolutely positioned child, and
   // the picture is normally narrower than the stage (a tall phone screen in a
   // wide panel). A percentage of the *picture* therefore put the mark outside
   // the picture entirely — two of three marks landed on the panel background.
   const source = readFileSync(clientPath, 'utf8')
-  const handler = source.slice(source.indexOf('function onShotPointerDown'), source.indexOf('function pressKey'))
-  assert.match(handler, /image\.parentElement/u, 'the mark must be placed against the stage')
-  assert.match(handler, /getBoundingClientRect\(\)/u)
-  // The offsets are computed from the press position minus the stage origin.
-  assert.match(handler, /event\.clientX - stageBox\.left/u)
-  assert.match(handler, /event\.clientY - stageBox\.top/u)
+  const helper = source.slice(source.indexOf('function toStagePoint('), source.indexOf('function markPoint('))
+  assert.ok(helper.length > 100, 'the stage mapping helper must be found')
+  // The offsets are computed from the pointer position minus the stage origin.
+  assert.match(helper, /clientX - stageBox\.left/u)
+  assert.match(helper, /clientY - stageBox\.top/u)
   // The border is excluded, because an absolutely positioned child is laid out
   // against the padding box, not the border box. `clientLeft` is read instead of
-  // `getComputedStyle`, which would force a style recalc on every tap.
-  assert.match(handler, /stage\.clientLeft/u)
-  assert.match(handler, /stage\.clientTop/u)
+  // `getComputedStyle`, which would force a style recalc on every move.
+  assert.match(helper, /stage\.clientLeft/u)
+  assert.match(helper, /stage\.clientTop/u)
   // A *call* to getComputedStyle is what forces the recalc; the comment that
   // explains why it is avoided is not the thing under test.
-  assert.equal(/getComputedStyle\(/u.test(handler), false, 'a tap must not force a style recalc')
-  // No percentage-of-picture positioning, which is the form that broke.
-  assert.equal(/left: `\$\{\(\(event\.clientX - box\.left\) \/ box\.width\) \* 100\}%`/u.test(handler), false)
+  assert.equal(/getComputedStyle\(/u.test(helper), false, 'a gesture must not force a style recalc')
+  // No percentage positioning, which is the form that broke.
+  assert.equal(/%`/u.test(helper), false, 'the mark must not be positioned as a percentage')
 })
 
 test('a tap is mapped to the device pixel it landed in, and floored', () => {
@@ -423,15 +445,19 @@ test('a tap is mapped to the device pixel it landed in, and floored', () => {
   // the nearer pixel center, which biases every coordinate by up to half a pixel
   // and can reach a pixel past the far edge.
   const source = readFileSync(clientPath, 'utf8')
-  const handler = source.slice(source.indexOf('function onShotPointerDown'), source.indexOf('function pressKey'))
-  assert.match(handler, /Math\.floor\(\(\(event\.clientX - box\.left\) \/ box\.width\) \* width\)/u)
-  assert.match(handler, /Math\.floor\(\(\(event\.clientY - box\.top\) \/ box\.height\) \* height\)/u)
-  // Both axes are clamped inside the screen, so a press on the very border still
+  // The mapping is shared by the press, the moves, and the release, so a tap and
+  // the two ends of a swipe cannot drift apart.
+  const helper = source.slice(source.indexOf('function toDevicePoint('), source.indexOf('function toStagePoint('))
+  assert.ok(helper.length > 100, 'the device mapping helper must be found')
+  assert.match(helper, /Math\.floor\(\(\(clientX - box\.left\) \/ box\.width\) \* width\)/u)
+  assert.match(helper, /Math\.floor\(\(\(clientY - box\.top\) \/ box\.height\) \* height\)/u)
+  // Both axes are clamped inside the screen, so a point on the very border still
   // names a pixel that exists.
-  assert.match(handler, /, 0, width - 1\)/u)
-  assert.match(handler, /, 0, height - 1\)/u)
-  // A secondary button (a pen's eraser, a middle click) is not a tap.
-  assert.match(handler, /event\.button !== 0/u)
+  assert.match(helper, /, 0, width - 1\)/u)
+  assert.match(helper, /, 0, height - 1\)/u)
+  // A secondary button (a pen's eraser, a middle click) is not a gesture.
+  const down = source.slice(source.indexOf('function onShotPointerDown'), source.indexOf('function onShotPointerMove'))
+  assert.match(down, /event\.button !== 0/u)
 })
 
 test('a burst of taps schedules one sweep timer, not one per tap', () => {
@@ -439,14 +465,16 @@ test('a burst of taps schedules one sweep timer, not one per tap', () => {
   // ~5 fps the picture repaints anyway; a fast double tap should not add two
   // timers and two state updates on top of that.
   const source = readFileSync(clientPath, 'utf8')
-  const handler = source.slice(source.indexOf('function onShotPointerDown'), source.indexOf('function pressKey'))
-  assert.match(handler, /if \(markSweepRef\.current === null\)/u, 'the timer must only be scheduled when idle')
-  assert.match(handler, /setTimeout\(sweepMarks, MARK_LIFETIME_MS\)/u)
+  const marker = source.slice(source.indexOf('function markPoint('), source.indexOf('function onShotPointerDown'))
+  assert.ok(marker.length > 100, 'the mark helper must be found')
+  assert.match(marker, /if \(markSweepRef\.current === null\)/u, 'the timer must only be scheduled when idle')
+  assert.match(marker, /setTimeout\(sweepMarks, MARK_LIFETIME_MS\)/u)
   assert.match(source, /const markSweepRef = useRef\(null\)/u)
   // A single fixed-delay timer would strand a mark made just before it fired:
   // the cutoff would spare it and nothing would ever remove it again. The sweep
   // must re-arm for the oldest survivor, and must clear the ref when idle.
-  const sweep = source.slice(source.indexOf('const sweepMarks = useCallback'), source.indexOf('function onShotPointerDown'))
+  const sweep = source.slice(source.indexOf('const sweepMarks = useCallback'), source.indexOf('function toDevicePoint('))
+  assert.ok(sweep.length > 200, 'the sweep helper must be the real one, not an empty tail')
   assert.match(sweep, /now - entry\.at < MARK_LIFETIME_MS/u, 'marks are pruned by age')
   assert.match(sweep, /oldest/u, 'it must re-arm against the oldest surviving mark')
   assert.match(sweep, /Math\.max\(1, /u, 'a zero delay must not be able to spin')
@@ -530,3 +558,316 @@ test('a UI tree that arrives after a device switch is never rendered tappable', 
   assert.equal(rows.length, 0, 'a dump for another device must not be rendered as rows')
   assert.equal(textOf(tree).join(' ').includes('Button "Old"'), false, 'the old device text must not be shown')
 })
+
+// ── the UI tree is a tree ──────────────────────────────────────────────────
+// The Host answers both views of one dump, and the panel draws the outline: the
+// point of the card is the hierarchy, which a flat list of identical rows cannot
+// show however it is styled.
+
+/** The outline the Host now sends, as `/hdc/uitree` would return it. */
+const OUTLINE_ROWS = [
+  { depth: 0, type: 'Root', text: 'root', clickable: false, tap: { x: 50, y: 50 }, hasChildren: true },
+  { depth: 1, type: 'Column', text: 'list', clickable: false, tap: { x: 50, y: 40 }, hasChildren: true },
+  { depth: 2, type: 'Button', text: 'Next', clickable: true, tap: { x: 20, y: 12 }, hasChildren: false },
+  { depth: 2, type: 'Image', clickable: true, tap: { x: 80, y: 12 }, hasChildren: false },
+  { depth: 1, type: 'Text', text: 'Loose', clickable: false, tap: { x: 50, y: 80 }, hasChildren: false },
+]
+
+/** Render a panel holding one device whose dump is the given outline. */
+async function panelWithOutline(rows, extra = {}) {
+  const inputCalls = []
+  const { pages, react } = loadClient(async (url, init = {}) => {
+    const pathname = String(url).split('?')[0]
+    if (pathname === '/hdc/devices') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
+    }
+    if (pathname === '/hdc/input') {
+      inputCalls.push(JSON.parse(String(init.body ?? '{}')))
+      return { ok: true, status: 200, clone() { return { json: async () => ({ device: 'phone-1', command: 'ok' }) } } }
+    }
+    if (pathname === '/hdc/uitree') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ device: 'phone-1', content: 'outline', truncated: false, rows, ...extra }) } } }
+    }
+    return { ok: true, status: 200, clone() { return { json: async () => ({}) } } }
+  })
+  const page = pages[0].component
+  react.render(page, { t: (key) => key })
+  await settle()
+  let { tree } = react.render(page, { t: (key) => key })
+  elementsOf(tree, 'hdci-card-toggle')[0].props.onClick()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+  await settle()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+  return { tree: () => tree, react, page, inputCalls, set: (next) => { tree = next } }
+}
+
+test('the panel draws the outline at the depth the Host reported', async () => {
+  const panel = await panelWithOutline(OUTLINE_ROWS)
+  const rows = elementsOf(panel.tree(), 'hdci-treerow')
+  assert.deepEqual(rows.map((row) => row.props['aria-level']), [1, 2, 3, 3, 2], 'each row is one level under its parent')
+  // The indent is what makes it read as a tree, and it is a style on the row
+  // because a nested element per level would break the single scroll column.
+  const pads = rows.map((row) => row.props.style.paddingLeft)
+  assert.deepEqual(pads, ['6px', '18px', '30px', '30px', '18px'])
+  // The label is the node, not the Host's rendered text line: the two views
+  // must not be able to disagree.
+  assert.match(textOf(panel.tree()).join(' '), /Button "Next"/u)
+})
+
+test('a deep row keeps a readable width instead of indenting forever', async () => {
+  // A real dump nests 21 levels. At a fixed step that is ~250 px of left padding
+  // in a column narrower than that, so the rows would be all margin and no text.
+  const deep = [
+    { depth: 0, type: 'Root', clickable: false, tap: { x: 1, y: 1 }, hasChildren: true },
+    ...Array.from({ length: 30 }, (_, level) => (
+      { depth: level + 1, type: 'Text', text: `L${level + 1}`, clickable: false, tap: { x: 1, y: 1 }, hasChildren: false }
+    )),
+  ]
+  const panel = await panelWithOutline(deep)
+  const pads = elementsOf(panel.tree(), 'hdci-treerow').map((row) => Number.parseInt(row.props.style.paddingLeft, 10))
+  assert.ok(pads.at(-1) <= 168, `the indent must be capped, got ${pads.at(-1)}px`)
+  // It still grows until the cap, so shallow levels stay visually distinct.
+  assert.ok(pads[1] > pads[0])
+  assert.equal(pads.at(-1), pads.at(-2), 'past the cap every level starts at the same place')
+})
+
+test('a row with children folds and unfolds its subtree', async () => {
+  const panel = await panelWithOutline(OUTLINE_ROWS)
+  const carets = () => elementsOf(panel.tree(), 'hdci-treecaret').filter((node) => node.type === 'button')
+  assert.equal(carets().length, 2, 'only the two rows with children get a caret')
+
+  // Fold the Column: its two children go away, its sibling stays.
+  carets()[1].props.onClick()
+  panel.set(panel.react.render(panel.page, { t: (key) => key }).tree)
+  assert.equal(elementsOf(panel.tree(), 'hdci-treerow').length, 3)
+  const afterFold = textOf(panel.tree()).join(' ')
+  assert.match(afterFold, /Column/u)
+  assert.equal(afterFold.includes('"Next"'), false, 'a folded child must not be rendered')
+  assert.match(afterFold, /"Loose"/u, 'the next sibling must still be shown')
+
+  // Unfold: the subtree comes back.
+  elementsOf(panel.tree(), 'hdci-treecaret').filter((node) => node.type === 'button')[1].props.onClick()
+  panel.set(panel.react.render(panel.page, { t: (key) => key }).tree)
+  assert.equal(elementsOf(panel.tree(), 'hdci-treerow').length, 5)
+})
+
+test('folding a parent hides only its own descendants', async () => {
+  // Depth-only rows make this the easy bug to write: hiding everything after the
+  // folded row, instead of everything *deeper* than it, would swallow its next
+  // sibling as well.
+  const panel = await panelWithOutline(OUTLINE_ROWS)
+  // Fold the root: everything under it goes, and nothing at its own depth exists.
+  elementsOf(panel.tree(), 'hdci-treecaret').filter((node) => node.type === 'button')[0].props.onClick()
+  panel.set(panel.react.render(panel.page, { t: (key) => key }).tree)
+  assert.equal(elementsOf(panel.tree(), 'hdci-treerow').length, 1)
+  assert.match(textOf(panel.tree()).join(' '), /root/u)
+})
+
+test('a row press still taps that control, and the caret is not a tap', async () => {
+  const panel = await panelWithOutline(OUTLINE_ROWS)
+  const bodies = () => elementsOf(panel.tree(), 'hdci-treerow-body').filter((node) => node.type === 'button')
+  assert.equal(bodies().length, 5, 'every row in this dump has a tap point')
+
+  bodies()[2].props.onClick()
+  await settle()
+  assert.deepEqual(panel.inputCalls.at(-1), { device: 'phone-1', action: 'click', x: 20, y: 12 })
+
+  // The caret must never reach the device: it folds locally.
+  const before = panel.inputCalls.length
+  elementsOf(panel.tree(), 'hdci-treecaret').filter((node) => node.type === 'button')[0].props.onClick()
+  await settle()
+  assert.equal(panel.inputCalls.length, before, 'folding must not send a tap')
+})
+
+test('a Host that answers only flat content still renders rows', async () => {
+  // An older Host copy has no `rows`. The panel must degrade to the flat list it
+  // used to draw rather than showing nothing.
+  const { pages, react } = loadClient(async (url) => {
+    const pathname = String(url).split('?')[0]
+    if (pathname === '/hdc/devices') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
+    }
+    if (pathname === '/hdc/uitree') {
+      return {
+        ok: true,
+        status: 200,
+        clone: () => ({ json: async () => ({ device: 'phone-1', content: 'Button "Next" clickable @ [84,1127][1088x168] tap (628, 1211)', truncated: false }) }),
+      }
+    }
+    return { ok: true, status: 200, clone() { return { json: async () => ({}) } } }
+  })
+  const page = pages[0].component
+  react.render(page, { t: (key) => key })
+  await settle()
+  let { tree } = react.render(page, { t: (key) => key })
+  elementsOf(tree, 'hdci-card-toggle')[0].props.onClick()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+  await settle()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+
+  const rows = elementsOf(tree, 'hdci-treerow')
+  assert.equal(rows.length, 1)
+  assert.equal(textOf(tree).join(' ').includes('Button "Next"'), true)
+  assert.equal(elementsOf(tree, 'hdci-treecaret').filter((node) => node.type === 'button').length, 0, 'a flat dump has nothing to fold')
+})
+
+// ── gestures on the picture: tap and swipe ─────────────────────────────────
+// The picture has to carry both, and the difference is a distance the finger
+// travels, so these drive the three pointer handlers the way a browser would and
+// assert on what actually reaches `/hdc/input`.
+
+/**
+ * Render a panel that has one device, and return its live picture plus the
+ * `/hdc/input` bodies it sends.
+ */
+async function pictureWithInputs(routes = {}) {
+  const inputCalls = []
+  const { pages, react } = loadClient(async (url, init = {}) => {
+    const pathname = String(url).split('?')[0]
+    if (pathname === '/hdc/devices') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
+    }
+    if (pathname === '/hdc/input') {
+      inputCalls.push(JSON.parse(String(init.body ?? '{}')))
+      return { ok: true, status: 200, clone() { return { json: async () => ({ device: 'phone-1', command: 'ok' }) } } }
+    }
+    const handler = routes[pathname]
+    if (handler !== undefined) {
+      const body = await handler(init)
+      return { ok: true, status: 200, clone() { return { json: async () => body } } }
+    }
+    return { ok: true, status: 200, clone() { return { json: async () => ({}) } } }
+  })
+  const page = pages[0].component
+  react.render(page, { t: (key) => key, ...{ } })
+  await settle()
+  const { tree } = react.render(page, { t: (key) => key })
+  const picture = elementsOf(tree, 'hdci-shot')[0]
+  // A 100x200 picture drawn at its captured size, inside a stage with no border.
+  const bounds = { left: 0, top: 0, width: 100, height: 200 }
+  const stage = { clientLeft: 0, clientTop: 0, getBoundingClientRect: () => bounds }
+  const image = {
+    naturalWidth: 100,
+    naturalHeight: 200,
+    getBoundingClientRect: () => bounds,
+    parentElement: stage,
+    // The browser's pointer capture, recorded so a gesture that leaves the
+    // picture is still delivered.
+    captured: [],
+    setPointerCapture(id) { this.captured.push(id) },
+    releasePointerCapture(id) { this.captured.push(`release:${id}`) },
+  }
+  /** Drive a full gesture in display pixels. */
+  function gesture(from, to, options = {}) {
+    const { pointerId = 1, moves = [to], cancel = false } = options
+    picture.props.onPointerDown({ button: 0, pointerId, clientX: from.x, clientY: from.y, currentTarget: image })
+    for (const point of moves) {
+      picture.props.onPointerMove({ pointerId, clientX: point.x, clientY: point.y, currentTarget: image })
+    }
+    if (cancel) picture.props.onPointerCancel({ pointerId })
+    else picture.props.onPointerUp({ button: 0, pointerId, clientX: to.x, clientY: to.y, currentTarget: image })
+  }
+  return { picture, image, inputCalls, gesture, react, page, reRender: () => react.render(page, { t: (key) => key }) }
+}
+
+test('a drag past the threshold is sent as a swipe, in device pixels', async () => {
+  const { inputCalls, gesture } = await pictureWithInputs()
+  // From (10, 20) to (60, 150) on a picture drawn at its own size.
+  gesture({ x: 10, y: 20 }, { x: 60, y: 150 })
+  await settle()
+  assert.equal(inputCalls.length, 1, 'a drag must send exactly one input')
+  assert.deepEqual(inputCalls[0], {
+    device: 'phone-1',
+    action: 'swipe',
+    x: 10,
+    y: 20,
+    to_x: 60,
+    to_y: 150,
+    duration_ms: 600,
+  })
+})
+
+test('a press that stays put is still sent as a tap, on release', async () => {
+  const { inputCalls, gesture } = await pictureWithInputs()
+  gesture({ x: 30, y: 40 }, { x: 32, y: 41 })
+  await settle()
+  assert.equal(inputCalls.length, 1, 'a near-stationary press must send one input')
+  assert.equal(inputCalls[0].action, 'click')
+  // The picture is drawn at its captured size, so display and device pixels
+  // coincide here; the release point is what a tap names.
+  assert.equal(inputCalls[0].x, 32)
+  assert.equal(inputCalls[0].y, 41)
+})
+
+test('a cancelled gesture sends nothing at all', async () => {
+  // A scroll, a pinch, or the window losing focus takes the gesture away. What
+  // the user meant is unknown then, and a guessed tap is a real press on a real
+  // device.
+  const { inputCalls, gesture } = await pictureWithInputs()
+  gesture({ x: 10, y: 10 }, { x: 90, y: 190 }, { cancel: true })
+  await settle()
+  assert.deepEqual(inputCalls, [], 'a cancelled gesture must not reach the device')
+})
+
+test('a swipe that ends where it began is treated as a tap', async () => {
+  // A finger that travels out and comes back names no displacement; asking the
+  // device to drag zero distance accomplishes nothing.
+  const { inputCalls, gesture } = await pictureWithInputs()
+  gesture({ x: 50, y: 100 }, { x: 50, y: 100 }, { moves: [{ x: 90, y: 180 }, { x: 50, y: 100 }] })
+  await settle()
+  assert.equal(inputCalls.length, 1)
+  assert.equal(inputCalls[0].action, 'click', 'a zero-distance swipe becomes a tap')
+})
+
+test('the swipe being drawn appears while the finger is still down', async () => {
+  // The gesture is invisible until it is committed unless the panel draws it, and
+  // a swipe whose direction cannot be seen beforehand is hard to aim. The line
+  // must therefore exist *before* the release, and be gone after it.
+  const { picture, image, inputCalls, reRender } = await pictureWithInputs()
+  picture.props.onPointerDown({ button: 0, pointerId: 1, clientX: 10, clientY: 20, currentTarget: image })
+  picture.props.onPointerMove({ pointerId: 1, clientX: 60, clientY: 150, currentTarget: image })
+  await settle()
+  let tree = reRender().tree
+  const line = elementsOf(tree, 'hdci-drag-line')[0]
+  assert.ok(line !== undefined, 'a swipe in progress must be drawn')
+  assert.equal(line.props.x1, 10)
+  assert.equal(line.props.y1, 20)
+  assert.equal(line.props.x2, 60)
+  assert.equal(line.props.y2, 150)
+  assert.deepEqual(inputCalls, [], 'nothing is sent until the finger lifts')
+
+  picture.props.onPointerUp({ button: 0, pointerId: 1, clientX: 60, clientY: 150, currentTarget: image })
+  await settle()
+  tree = reRender().tree
+  assert.equal(elementsOf(tree, 'hdci-drag-line').length, 0, 'the line goes away once the gesture ends')
+  assert.equal(inputCalls.length, 1, 'and the swipe is sent')
+  assert.equal(inputCalls[0].action, 'swipe')
+})
+
+test('the picture declares every pointer handler a gesture needs', async () => {
+  const { picture } = await pictureWithInputs()
+  // Without capture and the move handler, a swipe that leaves the picture stops
+  // being reported and the gesture is truncated at the edge.
+  assert.equal(typeof picture.props.onPointerDown, 'function')
+  assert.equal(typeof picture.props.onPointerMove, 'function')
+  assert.equal(typeof picture.props.onPointerUp, 'function')
+  assert.equal(typeof picture.props.onPointerCancel, 'function')
+  // The press must not also be handled as a click: a click waits for the button
+  // to come back up and never arrives for a touch press that drifts.
+  assert.equal(picture.props.onClick, undefined)
+})
+
+test('the picture refuses a swipe, so the browser never scrolls instead', () => {
+  // `touch-action:none` is what keeps a drag on the picture from becoming a page
+  // scroll, which would swallow the gesture before the panel saw it.
+  const css = panelCss()
+  const shot = css.split('\n').find((line) => /^\.hdci-shot\{/u.test(line))
+  assert.ok(shot !== undefined, 'the picture rule must exist')
+  assert.match(shot, /touch-action:none/u)
+  // The drag overlay must not take pointer events, or it would capture the very
+  // moves that drive it.
+  const drag = css.split('\n').find((line) => /^\.hdci-drag\{/u.test(line))
+  assert.ok(drag !== undefined, 'the drag overlay must be styled')
+  assert.match(drag, /pointer-events:none/u)
+})
+

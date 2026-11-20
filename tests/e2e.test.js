@@ -152,6 +152,11 @@ test('the hierarchy keeps an unlabeled clickable control by default', async () =
     // all_nodes still reveals everything, containers included.
     const all = await tool.execute({ all_nodes: true }, exec())
     assert.match(all.content, /Column/u)
+
+    // The panel's outline stays out of the model-facing result: this tool's
+    // output schema does not declare `rows`, and the flat text is the whole of
+    // what a model reads. The HTTP route is what carries the structure.
+    assert.deepEqual(Object.keys(value).sort(), ['content', 'device', 'truncated'])
   } finally {
     await h.cleanup()
   }

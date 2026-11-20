@@ -16,18 +16,26 @@ device:
   the device appears without waiting out a refresh interval. Expect a few frames
   per second rather than 30: see *Why the picture runs at a few frames per
   second*.
-- **Taps follow the finger.** The picture shows a target cursor with a center dot
-  at the exact point that becomes the device coordinate, outlined so it stays
-  visible over a light app as well as a dark one. A press is taken on
-  `pointerdown` rather than on `click`, so a press that drifts a few pixels — the
-  normal shape of a fingertip — is not cancelled as a drag, and a touch or pen
-  press lands too. The tap is mapped to the device pixel it fell in (floored, not
-  rounded to the nearest center, so nothing is biased by half a pixel).
-  Tapping the picture marks the exact spot at once and sends the tap; the mark
-  appears immediately because the device's own reply only arrives with a later
-  frame. Taps are queued rather than dropped, so a double tap or a fast second
-  tap is delivered in order instead of vanishing while the first one is still in
-  flight, and the buttons stay usable meanwhile.
+- **Taps and swipes follow the finger.** The picture shows a target cursor with a
+  center dot at the exact point that becomes the device coordinate, outlined so it
+  stays visible over a light app as well as a dark one. A press is taken on
+  `pointerdown` rather than on `click`, so a touch or pen press that drifts a few
+  pixels is not cancelled as a drag, and the gesture is followed through
+  `pointermove`/`pointerup` — with pointer capture, so a swipe that runs off the
+  edge of the picture is still delivered instead of being truncated there. What
+  the press turned out to be is decided on release: travel less than ten display
+  pixels and it is a tap, travel further and it is a swipe sent as
+  `uitest uiInput swipe` from where it started to where it ended. Coordinates are
+  mapped to the device pixel they fell in (floored, not rounded to the nearest
+  center, so nothing is biased by half a pixel).
+  A swipe draws its line while the finger is still down, so the direction can be
+  aimed before it is committed. A tap marks the spot at release; the mark appears
+  immediately because the device's own reply only arrives with a later frame. A
+  gesture the browser takes away — a scroll, a pinch, the window losing focus —
+  sends nothing at all, because guessing a tap from it would press an unknown
+  place on a real device. Inputs are queued rather than dropped, so a double tap
+  or a fast second tap is delivered in order instead of vanishing while the first
+  one is still in flight, and the buttons stay usable meanwhile.
 - **Screenshot** — saves the current frame at the device's own resolution and
   offers a link to download it.
 - **Record** — captures frames for the length picked beside the button (5, 10, 20,
@@ -120,6 +128,14 @@ plugin loads, naming the field, rather than failing partway through a device cal
   and every clickable node, so an icon button with no text, id, or description
   still appears with the point to tap. Pass `all_nodes` to include the plain
   containers as well.
+- **The panel draws the hierarchy, the tool prints it flat.** One dump answers
+  `/hdc/uitree` twice: `content` is one line per node, which is what a model
+  reads well, and `rows` carries the same nodes with their depth and whether
+  they have children, which is what the panel needs to indent and fold. Depth
+  counts kept ancestors only, not the document's own depth: a real screen puts a
+  labeled `Text` under twenty containers, so drawing the raw depth would spend
+  the whole column on indentation. Folding stays in the panel — the caret is its
+  own button, because a press anywhere else on the row is a tap on the device.
 - **A tap costs one device round trip, not two.** Every device call has to resolve
   which device it targets, and that resolution is a `hdc list targets` spawn. On
   the panel's click path that would double the work behind every tap, so the
@@ -206,7 +222,7 @@ already-installed copy needs a restart to load the new module generation.
 ## Development
 
 ```sh
-npm test          # 111 offline tests: tools, routes, framing, the panel, and a fake hdc
+npm test          # 132 offline tests: tools, routes, framing, the panel's gestures, and a fake hdc
 npm run test:schema   # tool and config schemas, checked with the installed harness
 ```
 
