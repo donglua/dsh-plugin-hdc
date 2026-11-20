@@ -988,3 +988,39 @@ test('a quick press is still a click, so the long press does not swallow taps', 
   assert.equal(inputCalls.length, 1)
   assert.equal(inputCalls[0].action, 'click')
 })
+
+test('a frame-sequence recording offers its path, not a JSON download', async () => {
+  // The artifact route answers a directory with a JSON listing, so an
+  // "open the recording" link for a sequence hands the user a document instead
+  // of a video. The frames are still kept; only the misleading link goes away.
+  const { pages, react } = loadClient(fetchWith({
+    '/hdc/devices': async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }),
+    '/hdc/record': async () => ({
+      device: 'phone-1',
+      kind: 'frames',
+      artifactId: 'a-frames',
+      savedPath: '/tmp/clip-frames',
+      frames: 12,
+      seconds: 5,
+      bytes: 900,
+    }),
+  }))
+  const page = pages[0].component
+  react.render(page, { t: (key) => key })
+  await settle()
+  let { tree } = react.render(page, { t: (key) => key })
+
+  // Start a recording and let it settle.
+  const startButton = tree.children
+    .flat(Infinity)
+    .filter((child) => child?.props?.onClick !== undefined)
+  elementsOf(tree, 'hdci-btn').find((node) => node.props.title === 'shot.record').props.onClick()
+  await settle()
+  await settle()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+
+  assert.equal(startButton !== undefined, true)
+  const links = elementsOf(tree, 'hdci-link')
+  assert.equal(links.length, 0, 'a frame sequence must not offer a download link')
+  assert.match(textOf(tree).join(' '), /shot\.recordFrames/u, 'the path is still reported')
+})

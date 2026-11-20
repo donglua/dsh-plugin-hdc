@@ -23,13 +23,24 @@ device:
   pixels is not cancelled as a drag, and the gesture is followed through
   `pointermove`/`pointerup` — with pointer capture, so a swipe that runs off the
   edge of the picture is still delivered instead of being truncated there. What
-  the press turned out to be is decided on release: travel less than ten display
-  pixels and it is a tap, travel further and it is a swipe sent as
-  `uitest uiInput swipe` from where it started to where it ended, replayed over
-  about the time the drag itself took (clamped to 120–1200 ms) so a flick stays a
-  flick instead of becoming a slow drag; a hold before the drag is not counted as
-  part of it. Coordinates are mapped to the device pixel they fell in (floored,
-  not rounded to the nearest center, so nothing is biased by half a pixel).
+  the press turned out to be is decided on release, by the *furthest* the pointer
+  got rather than by where it ended — a drag that travels out and comes back is
+  still a swipe, not a click at the starting point. Ten display pixels of travel
+  makes a swipe on touch (sixteen on a mouse, which does not wobble the way a
+  fingertip does); anything less is a tap, and a press held still for half a
+  second or more is sent as `longClick` instead, so a deliberate hold opens the
+  context menu the device would have opened. Coordinates are mapped to the device
+  pixel they fell in (floored, not rounded to the nearest center, so nothing is
+  biased by half a pixel).
+  A swipe is sent as `uitest uiInput swipe` from where it started to where it
+  ended. Its duration follows the pace the drag was actually made at, not a fixed
+  value, so a flick stays a flick instead of becoming a slow drag — but the pace
+  is also kept inside what the device accepts. That ceiling is measured, not
+  guessed: `uitest` refuses a swipe faster than about **3000 px/s** on a HarmonyOS
+  7.0.0 phone and silently substitutes its own pace, which is exactly the case a
+  fast flick lands in. 600 px in 150 ms and in 180 ms were both refused, in 200 ms
+  accepted; the panel therefore targets 200–2800 px/s. A hold before the drag is
+  not counted as part of the gesture.
   A swipe draws its line while the finger is still down, so the direction can be
   aimed before it is committed. A tap marks the spot at release; the mark appears
   immediately because the device's own reply only arrives with a later frame. A
@@ -224,7 +235,7 @@ already-installed copy needs a restart to load the new module generation.
 ## Development
 
 ```sh
-npm test          # 132 offline tests: tools, routes, framing, the panel's gestures, and a fake hdc
+npm test          # 156 offline tests: tools, routes, framing, the panel's gestures, and a fake hdc
 npm run test:schema   # tool and config schemas, checked with the installed harness
 ```
 
