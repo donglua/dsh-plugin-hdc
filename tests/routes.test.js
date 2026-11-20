@@ -772,3 +772,19 @@ test('an artifact id reaches the handler decoded, exactly as it was minted', asy
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('half a capture size is a 400 instead of a silent full-resolution capture', async () => {
+  const fake = services({ async record() { return { kind: 'video' } } })
+  const handler = createHandler({ services: fake })
+  for (const body of [{ width: 480 }, { height: 1060 }]) {
+    const res = await call(handler, '/hdc/record', { method: 'POST', body: JSON.stringify(body) })
+    assert.equal(res.statusCode, 400, `${JSON.stringify(body)} must be refused`)
+    assert.match(res.json().error.message, /together/u)
+  }
+  assert.equal(fake.calls.length, 0)
+  const ok = await call(handler, '/hdc/record', {
+    method: 'POST',
+    body: JSON.stringify({ width: 480, height: 1060 }),
+  })
+  assert.equal(ok.statusCode, 200)
+})

@@ -538,3 +538,19 @@ test('cancelling during encoding discards the file instead of finishing it', asy
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a capture size must be given as a pair, never half of one', () => {
+  // `snapshot_display` takes `-w`/`-h` as one size. Ignoring a lone side meant a
+  // documented option that did nothing: the caller asked for 480 px wide and got
+  // a full-resolution capture with no indication why.
+  for (const options of [{ width: 480 }, { height: 1060 }]) {
+    assert.throws(
+      () => frameLoopScript({ maxFrames: 2, ...options }),
+      (error) => error.code === 'HDC_BAD_ARGS',
+      `${JSON.stringify(options)} must be refused`,
+    )
+  }
+  // The pair is honoured, and neither side keeps the size flags absent.
+  assert.match(frameLoopScript({ maxFrames: 2, width: 480, height: 1060 }), /-w 480 -h 1060/u)
+  assert.equal(frameLoopScript({ maxFrames: 2 }).includes('-w '), false)
+})
