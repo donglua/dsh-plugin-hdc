@@ -1024,3 +1024,16 @@ test('a frame-sequence recording offers its path, not a JSON download', async ()
   assert.equal(links.length, 0, 'a frame sequence must not offer a download link')
   assert.match(textOf(tree).join(' '), /shot\.recordFrames/u, 'the path is still reported')
 })
+
+test('a drag that leaves the picture says so, instead of a frozen readout', () => {
+  // Past the edge the device coordinate stops advancing because it is clamped.
+  // Without a word about it the status line looks stuck while the finger keeps
+  // moving.
+  const source = readFileSync(clientPath, 'utf8')
+  const move = source.slice(source.indexOf('function onShotPointerMove'), source.indexOf('function onShotPointerUp'))
+  assert.match(move, /const atEdge = event\.clientX < box\.left/u, 'leaving the picture must be detected')
+  assert.match(move, /setDrag\(\{ from, to, start: gesture\.start, current, atEdge \}\)/u)
+  const bar = source.slice(source.indexOf('function renderStageBar'), source.indexOf('function renderActions'))
+  assert.match(bar, /drag\.atEdge \?/u, 'the status line must mention the edge')
+  assert.match(bar, /t\('shot\.edgeReached'\)/u)
+})
