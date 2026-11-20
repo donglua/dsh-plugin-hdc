@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
-import { createHandler, matchRoute, MAX_BODY_BYTES, ROUTE_PREFIX } from '../lib/routes.js'
+import { createHandler, matchRoute, MAX_BACKLOG_BYTES, MAX_BODY_BYTES, ROUTE_PREFIX } from '../lib/routes.js'
 
 /** A response double recording the status, headers, and body it was given. */
 function fakeResponse() {
@@ -585,4 +585,95 @@ test('the real binding passes the stream options through to the service', async 
   assert.equal(captured[0].options.device, 'dev-3')
   assert.equal(captured[0].hasSignal, true, 'the abort signal must reach the service')
   assert.equal(typeof original, 'function')
+})
+
+// ── a slow reader must slow the stream down ────────────────────────────────
+// A live picture whose client reads slower than the device captures cannot keep
+// writing: the unwritten frames queue in the response buffer and the Host grows
+// with them. The response double therefore reports backpressure like a socket
+// does, which `write()` returning `true` unconditionally could never catch.
+
+/** A response double whose socket applies backpressure until `drain`. */
+function slowResponse() {
+  const res = fakeResponse()
+  let blocked = false
+  let framesAccepted = 0
+  res.writableLength = 0
+  res.accepts = 3
+  res.write = function write(chunk) {
+    this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+    this.headersSent = true
+    framesAccepted += 1
+    this.writableLength += 1024
+    // Blocked once the client's budget is used up, exactly like a full socket.
+    blocked = framesAccepted >= this.accepts
+    return !blocked
+  }
+  // `drain` is a one-off event: the socket is writable again until its budget is
+  // used up, and the test decides whether that is once or for good.
+  res.emitDrain = ({ once = false } = {}) => {
+    blocked = false
+    framesAccepted = 0
+    res.writableLength = 0
+    if (!once) res.accepts = Number.POSITIVE_INFINITY
+    res.events.emit('drain')
+  }
+  return res
+}
+
+test('a frame is not read ahead of a client that is not draining', async () => {
+  let produced = 0
+  const stream = {
+    stderr: '',
+    frames: {
+      [Symbol.asyncIterator]() { return this },
+      async next() {
+        produced += 1
+        // Plenty of frames available: an unbounded reader would take all of them.
+        return { done: false, value: { data: Buffer.from([0xff, 0xd8, produced]), mediaType: 'image/jpeg' } }
+      },
+    },
+    stop() {},
+  }
+  const handler = createHandler({ services: services({ async openStream() { return { device: 'dev-1', stream } } }) })
+  const req = fakeRequest('/hdc/stream')
+  const res = slowResponse()
+  const pending = handler(req, res)
+  // Let the first part be written and the socket fill up.
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const afterFirstFrame = produced
+  assert.ok(afterFirstFrame <= 2, `the reader must pause under backpressure, produced ${afterFirstFrame}`)
+
+  // Draining resumes the stream, which proves the pause is a wait, not a stop.
+  res.emitDrain({ once: false })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.ok(produced > afterFirstFrame, 'a drained socket must let the stream continue')
+
+  // A client that goes away while blocked must release the wait.
+  res.writableEnded = true
+  res.events.emit('close')
+  await pending
+})
+
+test('a client that falls too far behind has its stream ended', async () => {
+  const stream = {
+    stderr: '',
+    frames: {
+      [Symbol.asyncIterator]() { return this },
+      async next() { return { done: false, value: { data: Buffer.from([0xff, 0xd8, 1]), mediaType: 'image/jpeg' } } },
+    },
+    stop() {},
+  }
+  const handler = createHandler({ services: services({ async openStream() { return { device: 'dev-1', stream } } }) })
+  const req = fakeRequest('/hdc/stream')
+  const res = slowResponse()
+  // Report a permanently full buffer, above the ceiling.
+  res.write = function write(chunk) {
+    this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+    this.headersSent = true
+    this.writableLength = MAX_BACKLOG_BYTES + 1
+    return false
+  }
+  await handler(req, res)
+  assert.equal(res.destroyed || res.writableEnded, true, 'an over-buffered stream must be ended, not grown')
 })
