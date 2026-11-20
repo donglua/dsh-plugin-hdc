@@ -382,3 +382,34 @@ test('a frame-sequence fallback never deletes a directory that was already there
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a recording ends on its deadline even when the device stops producing', async () => {
+  // The length is a promise the caller made: `seconds: 1` must not wait for a
+  // process that never writes again. The old loop only checked the clock when a
+  // frame arrived, so a hung capture held the call open indefinitely.
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-stall-'))
+  try {
+    // A client whose remote loop stays alive and prints nothing at all.
+    const stalled = path.join(dir, 'stalled.sh')
+    await writeFile(stalled, ['#!/bin/sh', 'sleep 60', ''].join('\n'))
+    chmodSync(stalled, 0o755)
+
+    const started = Date.now()
+    const options = { seconds: 1, savePath: path.join(dir, 'clip.mp4'), ffmpegPath: undefined }
+    // The grace period is part of the contract, so the assertion allows for it
+    // while still failing hard on "never returns".
+    const watchdog = setTimeout(() => {
+      process.stderr.write('the watchdog fired: the deadline did not end the recording\n')
+    }, 30_000)
+    watchdog.unref?.()
+    await assert.rejects(
+      () => recordScreen(stalled, 'FakePhone123', options),
+      (error) => error.code === 'HDC_RECORD_TIMEOUT' || error.code === 'HDC_CAPTURE_FAILED',
+    )
+    clearTimeout(watchdog)
+    const elapsed = Date.now() - started
+    assert.ok(elapsed < 25_000, `a stalled device must end the call, took ${elapsed} ms`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
