@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import { chmodSync } from 'node:fs'
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -336,6 +336,49 @@ test('a recording asks for the sequential loop, not the pipelined one', async ()
   } finally {
     if (previousDir === undefined) delete process.env.DSH_HDC_FAKE_DIR
     else process.env.DSH_HDC_FAKE_DIR = previousDir
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a frame-sequence fallback never deletes a directory that was already there', async () => {
+  // `<name>-frames` is a path the user may already own, holding anything at all.
+  // The fallback used to `rm -rf` it first, which destroyed unrelated files; it
+  // must claim a free name instead and leave the existing directory untouched.
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-keep-'))
+  const previousDir = process.env.DSH_HDC_FAKE_DIR
+  const previousFrames = process.env.DSH_HDC_FAKE_FRAMES
+  process.env.DSH_HDC_FAKE_DIR = dir
+  process.env.DSH_HDC_FAKE_FRAMES = '2'
+  try {
+    const savePath = path.join(dir, 'clip.mp4')
+    const occupied = path.join(dir, 'clip-frames')
+    await mkdir(occupied, { recursive: true })
+    const marker = path.join(occupied, 'unrelated-user-data.txt')
+    await writeFile(marker, 'do not delete me')
+
+    const result = await recordScreen(fakeHdc, 'FakePhone123', {
+      seconds: 1,
+      savePath,
+      ffmpegPath: undefined,
+    })
+
+    assert.equal(await readFile(marker, 'utf8'), 'do not delete me', 'the user file must survive')
+    assert.equal(result.savedPath, `${occupied}-2`, 'a free numbered name is claimed instead')
+    assert.equal((await readdir(result.savedPath)).length, 2, 'every frame still lands somewhere')
+
+    // A second run must not reuse the first fallback directory either.
+    const again = await recordScreen(fakeHdc, 'FakePhone123', {
+      seconds: 1,
+      savePath,
+      ffmpegPath: undefined,
+    })
+    assert.equal(again.savedPath, `${occupied}-3`)
+    assert.equal(await readFile(marker, 'utf8'), 'do not delete me')
+  } finally {
+    if (previousDir === undefined) delete process.env.DSH_HDC_FAKE_DIR
+    else process.env.DSH_HDC_FAKE_DIR = previousDir
+    if (previousFrames === undefined) delete process.env.DSH_HDC_FAKE_FRAMES
+    else process.env.DSH_HDC_FAKE_FRAMES = previousFrames
     await rm(dir, { recursive: true, force: true })
   }
 })
