@@ -793,9 +793,14 @@ test('a swipe keeps the speed it was made at, within the device range', async ()
   // A fixed duration makes every gesture feel identical: a quick flick is
   // replayed as a slow drag, which a list scrolls a shorter distance for.
   const source = readFileSync(clientPath, 'utf8')
-  assert.match(source, /duration_ms: clampDuration\(Date\.now\(\) - gesture\.startedAt\)/u)
+  assert.match(source, /duration_ms: clampDuration\(Date\.now\(\) - \(gesture\.swipeStartedAt/u)
   assert.match(source, /const SWIPE_MIN_DURATION_MS = 120/u)
   assert.match(source, /const SWIPE_MAX_DURATION_MS = 1200/u)
+  // The clock starts when the press *becomes* a swipe, not when it went down: a
+  // long hold before the drag is not part of the swipe, and counting it would
+  // replay a deliberate press-then-drag far slower than it was made.
+  assert.match(source, /if \(!gesture\.swiping\) gesture\.swipeStartedAt = Date\.now\(\)/u)
+  assert.equal(/duration_ms: clampDuration\(Date\.now\(\) - gesture\.startedAt\)/u.test(source), false)
   // A gesture that never ended still has to name something usable.
   const helper = source.slice(source.indexOf('function clampDuration('), source.indexOf('// ── styles'))
   assert.match(helper, /Number\.isFinite/u, 'a missing elapsed time must fall back')

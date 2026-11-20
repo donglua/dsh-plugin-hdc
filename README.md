@@ -26,10 +26,10 @@ device:
   the press turned out to be is decided on release: travel less than ten display
   pixels and it is a tap, travel further and it is a swipe sent as
   `uitest uiInput swipe` from where it started to where it ended, replayed over
-  about the time the gesture itself took (clamped to 120–1200 ms) so a flick
-  stays a flick instead of becoming a slow drag. Coordinates are mapped to the
-  device pixel they fell in (floored, not rounded to the nearest center, so
-  nothing is biased by half a pixel).
+  about the time the drag itself took (clamped to 120–1200 ms) so a flick stays a
+  flick instead of becoming a slow drag; a hold before the drag is not counted as
+  part of it. Coordinates are mapped to the device pixel they fell in (floored,
+  not rounded to the nearest center, so nothing is biased by half a pixel).
   A swipe draws its line while the finger is still down, so the direction can be
   aimed before it is committed. A tap marks the spot at release; the mark appears
   immediately because the device's own reply only arrives with a later frame. A

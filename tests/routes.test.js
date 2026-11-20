@@ -677,3 +677,56 @@ test('a client that falls too far behind has its stream ended', async () => {
   await handler(req, res)
   assert.equal(res.destroyed || res.writableEnded, true, 'an over-buffered stream must be ended, not grown')
 })
+
+// ── a body field is validated at the edge, not on the device ────────────────
+// A JSON body can carry any type. Left unchecked, `seconds: "bad"` became `NaN`
+// and then a device script asking for `-lt NaN` frames, and a non-string `device`
+// was silently dropped, which ran the call on whatever happened to be attached.
+
+test('a non-string device in the body is a 400, not a silent default', async () => {
+  const fake = services()
+  const handler = createHandler({ services: fake })
+  for (const device of [42, true, {}, []]) {
+    const res = await call(handler, '/hdc/input', {
+      method: 'POST',
+      body: JSON.stringify({ device, action: 'click', x: 1, y: 2 }),
+    })
+    assert.equal(res.statusCode, 400, `device ${JSON.stringify(device)} must be refused`)
+    assert.match(res.json().error.message, /device must be a string/u)
+  }
+  assert.equal(fake.calls.length, 0, 'a bad argument must not reach the device')
+})
+
+test('a recording length that is not a bounded integer is a 400', async () => {
+  const fake = services({ async record() { return { kind: 'video' } } })
+  const handler = createHandler({ services: fake })
+  for (const seconds of ['bad', 1.5, 0, -1, 181, Number.MAX_SAFE_INTEGER]) {
+    const res = await call(handler, '/hdc/record', { method: 'POST', body: JSON.stringify({ seconds }) })
+    assert.equal(res.statusCode, 400, `seconds ${JSON.stringify(seconds)} must be refused`)
+    assert.equal(res.json().error.code, 'HDC_BAD_ARGS')
+  }
+  assert.equal(fake.calls.length, 0)
+  // The documented range still goes through.
+  const ok = await call(handler, '/hdc/record', { method: 'POST', body: JSON.stringify({ seconds: 10 }) })
+  assert.equal(ok.statusCode, 200)
+})
+
+test('a capture dimension that is not a usable pixel count is a 400', async () => {
+  const fake = services({ async record() { return { kind: 'video' } } })
+  const handler = createHandler({ services: fake })
+  for (const width of [0, -5, 2.5, 'wide', 10_001]) {
+    const res = await call(handler, '/hdc/record', { method: 'POST', body: JSON.stringify({ width }) })
+    assert.equal(res.statusCode, 400, `width ${JSON.stringify(width)} must be refused`)
+  }
+  assert.equal(fake.calls.length, 0)
+})
+
+test('a query integer that overflows is refused instead of reaching the device', async () => {
+  const fake = services()
+  const handler = createHandler({ services: fake })
+  // A long digit string converts to Infinity, which no device call can use.
+  const res = await call(handler, `/hdc/logs?lines=${'9'.repeat(400)}`)
+  assert.equal(res.statusCode, 400)
+  assert.match(res.json().error.message, /out of range/u)
+  assert.equal(fake.calls.length, 0)
+})
