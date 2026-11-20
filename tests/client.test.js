@@ -187,6 +187,16 @@ function loadClient(fetchImpl) {
       exported.apply(ctx)
     },
   }
+  // A clock the test can push forward. The panel measures long presses and swipe
+  // durations with `Date.now()`, so holding a press for 700 ms has to be
+  // simulated rather than slept through. It is an *offset* on the real clock, not
+  // a frozen value: the panel also arms timers that re-read the clock to decide
+  // when to stop, and a clock that never advances would keep them alive forever
+  // instead of letting the test finish.
+  const clock = { offsetMs: 0 }
+  class SandboxDate extends Date {
+    static now() { return Date.now() + clock.offsetMs }
+  }
   const sandbox = {
     window: { __ModuleLoader__: loader },
     console,
@@ -197,11 +207,12 @@ function loadClient(fetchImpl) {
     clearTimeout,
     setInterval,
     clearInterval,
+    Date: SandboxDate,
     fetch: fetchImpl,
     document: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} },
   }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
-  return { ...registered, react }
+  return { ...registered, react, clock }
 }
 
 /** Every string in a rendered tree, skipping stylesheet text. */
@@ -358,7 +369,10 @@ test('the picture is a direct child of the stage, so it cannot outgrow it', () =
   // taps up to 952 device pixels away from where the user clicked.
   const source = readFileSync(clientPath, 'utf8')
   assert.equal(/className: 'hdci-shotbox'/u.test(source), false, 'no wrapper between the stage and the picture')
-  assert.match(source, /'hdci-stage' \}, renderStage\(\)/u, 'the stage renders the picture itself')
+  // The stage element must still render `renderStage()` as its own child; the
+  // surrounding props may change, so the assertion is about the call, not about
+  // the exact literal spelling of the element.
+  assert.match(source, /className: 'hdci-stage'[^}]*\}, renderStage\(\)/u, 'the stage renders the picture itself')
 })
 
 test('no rule gives the picture a minimum size that a stage cannot honour', () => {
@@ -722,7 +736,7 @@ test('a Host that answers only flat content still renders rows', async () => {
  */
 async function pictureWithInputs(routes = {}) {
   const inputCalls = []
-  const { pages, react } = loadClient(async (url, init = {}) => {
+  const { pages, react, clock } = loadClient(async (url, init = {}) => {
     const pathname = String(url).split('?')[0]
     if (pathname === '/hdc/devices') {
       return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
@@ -759,15 +773,15 @@ async function pictureWithInputs(routes = {}) {
   }
   /** Drive a full gesture in display pixels. */
   function gesture(from, to, options = {}) {
-    const { pointerId = 1, moves = [to], cancel = false } = options
-    picture.props.onPointerDown({ button: 0, pointerId, clientX: from.x, clientY: from.y, currentTarget: image })
+    const { pointerId = 1, moves = [to], cancel = false, pointerType = 'touch' } = options
+    picture.props.onPointerDown({ button: 0, pointerId, pointerType, clientX: from.x, clientY: from.y, currentTarget: image })
     for (const point of moves) {
-      picture.props.onPointerMove({ pointerId, clientX: point.x, clientY: point.y, currentTarget: image })
+      picture.props.onPointerMove({ pointerId, pointerType, clientX: point.x, clientY: point.y, currentTarget: image })
     }
     if (cancel) picture.props.onPointerCancel({ pointerId })
-    else picture.props.onPointerUp({ button: 0, pointerId, clientX: to.x, clientY: to.y, currentTarget: image })
+    else picture.props.onPointerUp({ button: 0, pointerId, pointerType, clientX: to.x, clientY: to.y, currentTarget: image })
   }
-  return { picture, image, inputCalls, gesture, react, page, reRender: () => react.render(page, { t: (key) => key }) }
+  return { picture, image, inputCalls, gesture, react, page, clock, reRender: () => react.render(page, { t: (key) => key }) }
 }
 
 test('a drag past the threshold is sent as a swipe, in device pixels', async () => {
@@ -789,22 +803,23 @@ test('a drag past the threshold is sent as a swipe, in device pixels', async () 
   assert.ok(call.duration_ms >= 120 && call.duration_ms <= 1200, `duration out of range: ${call.duration_ms}`)
 })
 
-test('a swipe keeps the speed it was made at, within the device range', async () => {
-  // A fixed duration makes every gesture feel identical: a quick flick is
-  // replayed as a slow drag, which a list scrolls a shorter distance for.
+test('a swipe is replayed inside the speed the device accepts', () => {
+  // A fixed duration makes every gesture feel identical, but duration alone is
+  // not enough: `uitest uiInput swipe` refuses a pace above roughly 3000 px/s and
+  // silently substitutes its own, which loses the flick. Measured on a HarmonyOS
+  // 7.0.0 phone: 600 px in 150 and 180 ms were both refused, in 200 ms accepted.
   const source = readFileSync(clientPath, 'utf8')
-  assert.match(source, /duration_ms: clampDuration\(Date\.now\(\) - \(gesture\.swipeStartedAt/u)
-  assert.match(source, /const SWIPE_MIN_DURATION_MS = 120/u)
-  assert.match(source, /const SWIPE_MAX_DURATION_MS = 1200/u)
-  // The clock starts when the press *becomes* a swipe, not when it went down: a
-  // long hold before the drag is not part of the swipe, and counting it would
-  // replay a deliberate press-then-drag far slower than it was made.
+  assert.match(source, /const SWIPE_MAX_SPEED_PX_PER_S = 2800/u)
+  assert.match(source, /const SWIPE_MIN_SPEED_PX_PER_S = 200/u)
+  assert.match(source, /function swipeDuration\(elapsedMs, distancePx\)/u)
+  // The duration is derived from distance and pace, so a fast flick is slowed to
+  // the accepted maximum rather than being handed over and rejected.
+  assert.match(source, /clamp\(observed, SWIPE_MIN_SPEED_PX_PER_S, SWIPE_MAX_SPEED_PX_PER_S\)/u)
+  assert.match(source, /duration_ms: swipeDuration\(/u)
+  // The clock starts when the press *becomes* a swipe, not when it went down.
   assert.match(source, /if \(!gesture\.swiping\) gesture\.swipeStartedAt = Date\.now\(\)/u)
-  assert.equal(/duration_ms: clampDuration\(Date\.now\(\) - gesture\.startedAt\)/u.test(source), false)
-  // A gesture that never ended still has to name something usable.
-  const helper = source.slice(source.indexOf('function clampDuration('), source.indexOf('// ── styles'))
-  assert.match(helper, /Number\.isFinite/u, 'a missing elapsed time must fall back')
 })
+
 
 test('a press that stays put is still sent as a tap, on release', async () => {
   const { inputCalls, gesture } = await pictureWithInputs()
@@ -851,8 +866,12 @@ test('the swipe being drawn appears while the finger is still down', async () =>
   assert.ok(line !== undefined, 'a swipe in progress must be drawn')
   assert.equal(line.props.x1, 10)
   assert.equal(line.props.y1, 20)
-  assert.equal(line.props.x2, 60)
-  assert.equal(line.props.y2, 150)
+  // The end of the line is the *device* point converted back, not the raw pointer
+  // position: once the pointer leaves the picture the device coordinate is
+  // clamped to the edge, and the line has to stop where the swipe will stop. The
+  // half pixel is the centre of the pixel the pointer landed in.
+  assert.equal(line.props.x2, 60.5)
+  assert.equal(line.props.y2, 150.5)
   assert.deepEqual(inputCalls, [], 'nothing is sent until the finger lifts')
 
   picture.props.onPointerUp({ button: 0, pointerId: 1, clientX: 60, clientY: 150, currentTarget: image })
@@ -914,4 +933,58 @@ test('a cancelled gesture takes its press mark with it', async () => {
   await settle()
   const tree = reRender().tree
   assert.equal(elementsOf(tree, 'hdci-ripple').length, 0, 'a cancelled press leaves no mark behind')
+})
+
+test('a press that travels out and comes back is a swipe, not a tap', () => {
+  // Judging the gesture by where it was *released* made a scroll that returns to
+  // near its start read as a tap, so the device got a click where the user meant
+  // to scroll. The furthest the pointer got is what decides.
+  return (async () => {
+    const { inputCalls, gesture } = await pictureWithInputs()
+    gesture({ x: 50, y: 100 }, { x: 52, y: 102 }, { moves: [{ x: 90, y: 180 }, { x: 52, y: 102 }] })
+    await settle()
+    assert.equal(inputCalls.length, 1)
+    assert.equal(inputCalls[0].action, 'swipe', 'travelling past the threshold decides the gesture, even if it returns')
+  })()
+})
+
+test('a mouse needs a longer slip than a fingertip before it counts as a drag', async () => {
+  // Ten pixels is normal wobble for a fingertip but a deliberate drag for a
+  // mouse, and a button clicked with a 12 px slip used to scroll instead.
+  const { inputCalls, gesture } = await pictureWithInputs()
+  gesture({ x: 10, y: 10 }, { x: 22, y: 10 }, { pointerType: 'mouse' })
+  await settle()
+  assert.equal(inputCalls.length, 1)
+  assert.equal(inputCalls[0].action, 'click', 'a small mouse slip stays a click')
+
+  const touch = await pictureWithInputs()
+  touch.gesture({ x: 10, y: 10 }, { x: 22, y: 10 }, { pointerType: 'touch' })
+  await settle()
+  assert.equal(touch.inputCalls[0].action, 'swipe', 'the same drag from a finger is a swipe')
+})
+
+test('a held press is sent as a long press, not a click', async () => {
+  // A real device treats a held press as its own gesture — usually a context menu
+  // or a drag handle. Sending a click for it performs an action the user did not
+  // make.
+  const { picture, image, inputCalls, clock } = await pictureWithInputs()
+  try {
+    picture.props.onPointerDown({ button: 0, pointerId: 1, pointerType: 'mouse', clientX: 40, clientY: 80, currentTarget: image })
+    // Hold past the long-press threshold without moving.
+    clock.offsetMs += 700
+    picture.props.onPointerUp({ button: 0, pointerId: 1, pointerType: 'mouse', clientX: 40, clientY: 80, currentTarget: image })
+    await settle()
+  } finally {
+    clock.offsetMs = 0
+  }
+  assert.equal(inputCalls.length, 1)
+  assert.equal(inputCalls[0].action, 'longClick')
+})
+
+test('a quick press is still a click, so the long press does not swallow taps', async () => {
+  const { gesture, inputCalls } = await pictureWithInputs()
+  gesture({ x: 40, y: 80 }, { x: 40, y: 80 })
+  await settle()
+  assert.equal(inputCalls.length, 1)
+  assert.equal(inputCalls[0].action, 'click')
 })
