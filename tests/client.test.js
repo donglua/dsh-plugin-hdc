@@ -615,6 +615,38 @@ async function panelWithOutline(rows, extra = {}) {
   return { tree: () => tree, react, page, inputCalls, set: (next) => { tree = next } }
 }
 
+test('a folded card does not build the body it is not showing', async () => {
+  // The panel re-renders on every coalesced pointer move while a gesture is drawn.
+  // Building the tree and log bodies eagerly made each of those renders walk the
+  // whole hierarchy and log list for cards that were folded, which is render time
+  // taken directly off the stream and the drag line. A folded card must therefore
+  // contribute its header and nothing else.
+  const panel = await panelWithOutline(OUTLINE_ROWS)
+  // The helper opens the first card; the second (logs) is left closed.
+  const closed = elementsOf(panel.tree(), 'hdci-card').filter((card) => card.props['data-open'] === 'false')
+  assert.ok(closed.length >= 1, 'the panel must have a folded card to test')
+  for (const card of closed) {
+    const nested = elementsOf(card, 'hdci-card-body')
+    assert.deepEqual(nested, [], 'a folded card must not contain a body')
+  }
+})
+
+test('a drag paints at most once per animation frame, and still ends on the finger', async () => {
+  // A pen or a high-rate trackpad reports several positions per painted frame, and
+  // each one used to write state. Only the last position before a repaint can be
+  // seen, so the extra writes were pure render cost.
+  const source = readFileSync(clientPath, 'utf8')
+  assert.match(source, /requestAnimationFrame\(/u, 'the drag must be coalesced to a frame')
+  assert.match(source, /const queueDrag = useCallback/u)
+  // The newest position wins: the frame paints what the ref holds, not a stale
+  // closure, so the line ends where the finger did.
+  assert.match(source, /const pending = pendingDragRef\.current/u)
+  assert.match(source, /if \(pending !== null\) setDrag\(pending\)/u)
+  // A gesture that ends, is cancelled, or loses its device must not have a queued
+  // frame paint a line back onto the picture.
+  assert.match(source, /const cancelDragFrame = useCallback/u)
+})
+
 test('the panel draws the outline at the depth the Host reported', async () => {
   const panel = await panelWithOutline(OUTLINE_ROWS)
   const rows = elementsOf(panel.tree(), 'hdci-treerow')
@@ -797,25 +829,34 @@ test('a drag past the threshold is sent as a swipe, in device pixels', async () 
   assert.equal(call.y, 20)
   assert.equal(call.to_x, 60)
   assert.equal(call.to_y, 150)
-  // The duration follows how long the gesture took, clamped to a usable range,
-  // so a flick stays a flick instead of becoming a slow drag.
-  assert.ok(Number.isInteger(call.duration_ms), 'the swipe must carry an integer duration')
-  assert.ok(call.duration_ms >= 120 && call.duration_ms <= 1200, `duration out of range: ${call.duration_ms}`)
+  // The velocity follows how fast the gesture was made, so a flick stays a flick
+  // instead of becoming a slow drag.
+  assert.ok(Number.isInteger(call.velocity), 'the swipe must carry an integer velocity')
+  assert.ok(
+    call.velocity >= 200 && call.velocity <= 40_000,
+    `velocity out of the range the device accepts: ${call.velocity}`,
+  )
+  assert.equal(call.duration_ms, undefined, 'a swipe must not send a duration')
 })
 
-test('a swipe is replayed inside the speed the device accepts', () => {
-  // A fixed duration makes every gesture feel identical, but duration alone is
-  // not enough: `uitest uiInput swipe` refuses a pace above roughly 3000 px/s and
-  // silently substitutes its own, which loses the flick. Measured on a HarmonyOS
-  // 7.0.0 phone: 600 px in 150 and 180 ms were both refused, in 200 ms accepted.
+test('a swipe is replayed at the velocity the device actually reads', () => {
+  // The fifth positional of `uitest uiInput swipe` is a *velocity*, not a
+  // duration. Measured on a HarmonyOS 7.0.0 phone: 199 px/s is refused and 200
+  // accepted, 40000 accepted and 40001 refused, each with "The swipe velocity out
+  // of range, the default value will be used" — a warning, not an error, so a
+  // mistaken unit is never reported and only shows up as a gesture played at the
+  // wrong speed.
   const source = readFileSync(clientPath, 'utf8')
-  assert.match(source, /const SWIPE_MAX_SPEED_PX_PER_S = 2800/u)
+  assert.match(source, /const SWIPE_MAX_SPEED_PX_PER_S = 40_000/u)
   assert.match(source, /const SWIPE_MIN_SPEED_PX_PER_S = 200/u)
-  assert.match(source, /function swipeDuration\(elapsedMs, distancePx\)/u)
-  // The duration is derived from distance and pace, so a fast flick is slowed to
-  // the accepted maximum rather than being handed over and rejected.
+  assert.match(source, /function swipeVelocity\(elapsedMs, distancePx\)/u)
+  // The pace is derived from distance and elapsed time, then clamped to the band
+  // the device accepts so it is never silently swapped for the default one.
   assert.match(source, /clamp\(observed, SWIPE_MIN_SPEED_PX_PER_S, SWIPE_MAX_SPEED_PX_PER_S\)/u)
-  assert.match(source, /duration_ms: swipeDuration\(/u)
+  assert.match(source, /velocity: swipeVelocity\(/u)
+  // The old, wrong shape must not come back.
+  assert.doesNotMatch(source, /duration_ms: swipeDuration\(/u)
+  assert.doesNotMatch(source, /function swipeDuration\(/u)
   // The clock starts when the press *becomes* a swipe, not when it went down.
   assert.match(source, /if \(!gesture\.swiping\) gesture\.swipeStartedAt = Date\.now\(\)/u)
 })
@@ -1032,7 +1073,10 @@ test('a drag that leaves the picture says so, instead of a frozen readout', () =
   const source = readFileSync(clientPath, 'utf8')
   const move = source.slice(source.indexOf('function onShotPointerMove'), source.indexOf('function onShotPointerUp'))
   assert.match(move, /const atEdge = event\.clientX < box\.left/u, 'leaving the picture must be detected')
-  assert.match(move, /setDrag\(\{ from, to, start: gesture\.start, current, atEdge \}\)/u)
+  // The position is queued for the next frame rather than written on the spot, so
+  // the assertion is about the payload reaching the drag state, not about which
+  // state setter carries it.
+  assert.match(move, /queueDrag\(\{ from, to, start: gesture\.start, current, atEdge \}\)/u)
   const bar = source.slice(source.indexOf('function renderStageBar'), source.indexOf('function renderActions'))
   assert.match(bar, /drag\.atEdge \?/u, 'the status line must mention the edge')
   assert.match(bar, /t\('shot\.edgeReached'\)/u)

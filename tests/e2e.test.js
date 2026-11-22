@@ -184,8 +184,14 @@ test('input builds the documented uitest commands', async () => {
     const tool = h.tools.get('hdc_input')
     assert.equal((await tool.execute({ action: 'click', x: 10, y: 20 }, exec())).command, 'click 10 20')
     assert.equal(
-      (await tool.execute({ action: 'swipe', x: 1, y: 2, to_x: 3, to_y: 4, duration_ms: 800 }, exec())).command,
+      (await tool.execute({ action: 'swipe', x: 1, y: 2, to_x: 3, to_y: 4, velocity: 800 }, exec())).command,
       'swipe 1 2 3 4 800',
+    )
+    // The fifth positional is a velocity, and `uitest` replaces anything under
+    // 200 px/s with its own default, so the floor is applied rather than lost.
+    assert.equal(
+      (await tool.execute({ action: 'swipe', x: 1, y: 2, to_x: 3, to_y: 4, velocity: 50 }, exec())).command,
+      'swipe 1 2 3 4 200',
     )
     assert.equal((await tool.execute({ action: 'key', key: 'Back' }, exec())).command, 'keyEvent Back')
     assert.equal((await tool.execute({ action: 'text', text: 'hello world' }, exec())).command, "text 'hello world'")

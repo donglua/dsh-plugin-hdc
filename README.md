@@ -33,14 +33,18 @@ device:
   pixel they fell in (floored, not rounded to the nearest center, so nothing is
   biased by half a pixel).
   A swipe is sent as `uitest uiInput swipe` from where it started to where it
-  ended. Its duration follows the pace the drag was actually made at, not a fixed
-  value, so a flick stays a flick instead of becoming a slow drag — but the pace
-  is also kept inside what the device accepts. That ceiling is measured, not
-  guessed: `uitest` refuses a swipe faster than about **3000 px/s** on a HarmonyOS
-  7.0.0 phone and silently substitutes its own pace, which is exactly the case a
-  fast flick lands in. 600 px in 150 ms and in 180 ms were both refused, in 200 ms
-  accepted; the panel therefore targets 200–2800 px/s. A hold before the drag is
-  not counted as part of the gesture.
+  ended, at a **velocity** — the pace the drag was actually made at, not a fixed
+  value, so a flick stays a flick instead of becoming a slow drag. The unit
+  matters and is easy to get wrong: the fifth positional of that command is a
+  velocity in pixels per second, not a duration, so handing it a millisecond count
+  means a 0.3 s flick is replayed over several seconds. Both ends of the accepted
+  band are measured on a HarmonyOS 7.0.0 phone: **199 px/s is refused and 200
+  accepted, 40000 accepted and 40001 refused**. Out of range is not an error — the
+  client prints `The swipe velocity out of range, the default value will be used`
+  and substitutes its own pace — so a wrong unit is never reported and only shows
+  up as a gesture that feels wrong. The panel therefore sends the measured pace
+  clamped into 200–40000 px/s, and a hold before the drag is not counted as part
+  of the gesture.
   A swipe draws its line while the finger is still down, so the direction can be
   aimed before it is committed. A tap marks the spot at release; the mark appears
   immediately because the device's own reply only arrives with a later frame. A
