@@ -1,248 +1,121 @@
 # dsh-plugin-hdc
 
-HarmonyOS device tools for DeepSeek Harness, over `hdc`.
+**简体中文** | **English**：[README.en.md](README.en.md)
 
-The plugin registers a family of `hdc_*` tools, so a HarmonyOS device can be
-driven from the conversation: see the screen, tap, read the control tree, install
-an app, read logs, move files, and record the screen. It also adds a device panel
-to the sidebar, for driving the same device without a conversation turn.
+基于 `hdc` 的 DeepSeek Harness HarmonyOS 设备工具。
 
-## Device panel
+插件注册一组 `hdc_*` 工具，让 HarmonyOS 设备可以直接在对话中操作：查看屏幕、点按、读取控件树、安装应用、读取日志、传输文件、录制屏幕。同时在侧边栏增加一个设备面板，不必发起对话轮次也能操作同一台设备。
 
-Open the phone icon in the sidebar to reach a full-page panel for the attached
-device:
+## 设备面板
 
-- **Live video** — the picture is a stream, not a polled screenshot, so motion on
-  the device appears without waiting out a refresh interval. Expect a few frames
-  per second rather than 30: see *Why the picture runs at a few frames per
-  second*.
-- **Taps and swipes follow the finger.** The picture shows a target cursor with a
-  center dot at the exact point that becomes the device coordinate, outlined so it
-  stays visible over a light app as well as a dark one. A press is taken on
-  `pointerdown` rather than on `click`, so a touch or pen press that drifts a few
-  pixels is not cancelled as a drag, and the gesture is followed through
-  `pointermove`/`pointerup` — with pointer capture, so a swipe that runs off the
-  edge of the picture is still delivered instead of being truncated there. What
-  the press turned out to be is decided on release, by the *furthest* the pointer
-  got rather than by where it ended — a drag that travels out and comes back is
-  still a swipe, not a click at the starting point. Ten display pixels of travel
-  makes a swipe on touch (sixteen on a mouse, which does not wobble the way a
-  fingertip does); anything less is a tap, and a press held still for half a
-  second or more is sent as `longClick` instead, so a deliberate hold opens the
-  context menu the device would have opened. Coordinates are mapped to the device
-  pixel they fell in (floored, not rounded to the nearest center, so nothing is
-  biased by half a pixel).
-  A swipe is sent as `uitest uiInput swipe` from where it started to where it
-  ended, at a **velocity** — the pace the drag was actually made at, not a fixed
-  value, so a flick stays a flick instead of becoming a slow drag. The unit
-  matters and is easy to get wrong: the fifth positional of that command is a
-  velocity in pixels per second, not a duration, so handing it a millisecond count
-  means a 0.3 s flick is replayed over several seconds. Both ends of the accepted
-  band are measured on a HarmonyOS 7.0.0 phone: **199 px/s is refused and 200
-  accepted, 40000 accepted and 40001 refused**. Out of range is not an error — the
-  client prints `The swipe velocity out of range, the default value will be used`
-  and substitutes its own pace — so a wrong unit is never reported and only shows
-  up as a gesture that feels wrong. The panel therefore sends the measured pace
-  clamped into 200–40000 px/s, and a hold before the drag is not counted as part
-  of the gesture.
-  A swipe draws its line while the finger is still down, so the direction can be
-  aimed before it is committed. A tap marks the spot at release; the mark appears
-  immediately because the device's own reply only arrives with a later frame. A
-  gesture the browser takes away — a scroll, a pinch, the window losing focus —
-  sends nothing at all, because guessing a tap from it would press an unknown
-  place on a real device. Inputs are queued rather than dropped, so a double tap
-  or a fast second tap is delivered in order instead of vanishing while the first
-  one is still in flight, and the buttons stay usable meanwhile.
-- **Screenshot** — saves the current frame at the device's own resolution and
-  offers a link to download it.
-- **Record** — captures frames for the length picked beside the button (5, 10, 20,
-  or 30 seconds) and joins them into an mp4. Pressing the recording button again
-  stops early. Both results are offered as a download link under the buttons.
-- **Back / Home / Power**, plus a text row for typing into the focused field.
-- **Interface hierarchy** — collapsible; each row carries a button that taps that
-  control's own center, so a control without a label is still reachable.
-- **Crash log** — the last crash lines, with a filter toggle.
+点击侧边栏的手机图标，进入已连接设备的全页面板：
 
-The panel talks to the Host half over `/hdc/*` on the page's own origin. Nothing
-leaves the machine, and the browser never calls `hdc` directly.
+- **实时画面** — 画面是流，不是轮询截图，设备上的变化不必等刷新间隔。帧率预期为每秒数帧而非 30 帧，原因见「为什么画面只有每秒数帧」。
+- **点按与滑动跟随手指。** 画面上显示一个目标光标，中心点即转换后的设备坐标，描边保证在浅色和深色应用上都可见。按下在 `pointerdown` 时即生效而非 `click`，因此触摸笔或手指按下后漂移几个像素不会被当成拖拽取消；手势通过 `pointermove`/`pointerup` 跟踪，并启用 pointer capture，滑出画面边缘的滑动仍会送达，不会在边缘被截断。按下的性质在抬起时判定，依据是**指针到达过的最远位置**而不是终点位置——来回拖出再拖回仍算滑动，不算回到起点的点按。触摸位移达到 10 个显示像素即算滑动（鼠标为 16 像素，因为鼠标不像指尖那样抖动），不足则为点按；按住不动达半秒以上则发送 `longClick`，让设备弹出它本该弹出的上下文菜单。坐标映射到其所在的设备像素（向下取整，不四舍五入到最近的中心，避免半个像素的偏移）。滑动以 `uitest uiInput swipe` 从起点发到终点，时长跟随实际拖动节奏而不是固定值，因此快速轻扫仍是轻扫，不会变成慢速拖动；但节奏也被限制在设备可接受的范围内。该上限是实测值而非估计值：`uitest` 在 HarmonyOS 7.0.0 手机上会拒绝快于约 **3000 px/s** 的滑动并静默替换成自己的节奏，而快速轻扫正好落在这个区间。600 px 用 150 ms 和 180 ms 均被拒绝，200 ms 通过；面板因此以 200–2800 px/s 为目标。拖动前的按住不计入手势时长。滑动在手指仍按下时就画线，方向可以在提交前调整。点按在抬起时标记位置，标记立即出现，因为设备自身的回执要等下一帧才到。浏览器接管的手势——滚动、缩放、窗口失焦——不发送任何输入，因为据此猜测点按会在真实设备上按下未知位置。输入采用排队而非丢弃，因此双击或快速第二次点按会按顺序送达，不会在第一次仍在处理时消失，期间按钮保持可用。
+- **截图** — 以设备自身分辨率保存当前帧，并提供下载链接。
+- **录制** — 按按钮旁选择的时长（5、10、20、30 秒）抓帧并合成 mp4。再次按下录制按钮可提前结束。截图和录制的产物都在按钮下方提供下载链接。
+- **Back / Home / Power**，以及一行用于向焦点输入框打字。
+- **界面层级** — 可折叠；每行带一个按钮，点按该控件自身的中心，因此无标签控件也能触达。
+- **崩溃日志** — 最后若干条崩溃行，带过滤开关。
 
-Every panel action is the same operation an `hdc_*` tool performs; the tools stay
-available and are the way to do anything the panel does not show.
+面板通过页面同源的 `/hdc/*` 与 Host 侧通信。数据不离开本机，浏览器从不直接调用 `hdc`。
 
-## Requirements
+面板的每个动作都等同于某个 `hdc_*` 工具的调用；工具仍然可用，面板未展示的操作通过工具完成。
 
-- The HarmonyOS `hdc` client. DevEco Studio ships one at
-  `sdk/default/openharmony/toolchains/hdc`; the HarmonyOS command-line tools work
-  too.
-- A connected device with USB debugging enabled, or a running emulator.
-- For `hdc_screenshot` only: a model that declares image input, the same
-  requirement `read_image` has.
+## 环境要求
 
-### How the client is located
+- HarmonyOS `hdc` 客户端。DevEco Studio 在
+  `sdk/default/openharmony/toolchains/hdc` 自带一份；HarmonyOS 命令行工具同样可用。
+- 已开启 USB 调试的连接设备，或正在运行的模拟器。
+- 仅 `hdc_screenshot` 需要：声明了图像输入的模型，与 `read_image` 的要求相同。
 
-The search runs on every call, so installing an SDK or fixing an environment
-variable takes effect without restarting the Host. In order:
+### 客户端的定位方式
 
-1. `hdcPath` from the plugin configuration, when set and the file exists.
-2. The SDK root named by `DEVECO_SDK_HOME`, `HOS_SDK_HOME`,
-   `HARMONYOS_SDK_HOME`, `OHOS_SDK_HOME`, `OHOS_BASE_SDK_HOME`, or
-   `HOS_SDK_PATH`, or the install root named by `DEVECO_HOME`,
-   `DEVECO_STUDIO_HOME`, `TOOL_HOME`, or `HOS_TOOLCHAIN_HOME`. A value may point
-   at the SDK directory or at the directory holding it; both are tried.
-3. The conventional install locations for the platform, including
-   `/Applications/DevEco-Studio.app/Contents/sdk` on macOS.
-4. SDK roots implied by `PATH`, which cover a DevEco Studio or command-line-tools
-   checkout installed anywhere else.
-5. The login shell's exported variables. A packaged desktop app does not inherit
-   a terminal's environment, so a `DEVECO_SDK_HOME` that works in a shell can be
-   absent from the Host; the plugin reads it back, caching the answer for five
-   minutes.
-6. `PATH` itself, last, because a stray or stale `hdc` there is a common cause of
-   "device not found" when DevEco itself connects fine.
+每次调用都会重新搜索，因此安装 SDK 或修正环境变量无需重启 Host。顺序如下：
 
-If the client really is somewhere none of those reach, set `hdcPath` to its
-absolute path.
+1. 插件配置中的 `hdcPath`，已设置且文件存在时优先。
+2. 由 `DEVECO_SDK_HOME`、`HOS_SDK_HOME`、`HARMONYOS_SDK_HOME`、`OHOS_SDK_HOME`、
+   `OHOS_BASE_SDK_HOME` 或 `HOS_SDK_PATH` 指定的 SDK 根目录，或由 `DEVECO_HOME`、
+   `DEVECO_STUDIO_HOME`、`TOOL_HOME`、`HOS_TOOLCHAIN_HOME` 指定的安装根目录。取值可以指向
+   SDK 目录本身，也可以指向包含它的目录，两者都会尝试。
+3. 该平台的常规安装位置，包括 macOS 上的
+   `/Applications/DevEco-Studio.app/Contents/sdk`。
+4. 从 `PATH` 推断出的 SDK 根目录，覆盖安装在其它位置的 DevEco Studio 或命令行工具。
+5. 登录 shell 导出的变量。打包后的桌面应用不继承终端环境，因此终端里有效的
+   `DEVECO_SDK_HOME` 在 Host 中可能不存在；插件会从登录 shell 读回该值，并缓存 5 分钟。
+6. 最后才是 `PATH` 本身，因为其中残留或过期的 `hdc` 是「设备未找到」的常见原因，即使
+   DevEco 自身连接正常。
 
-## Tools
+如果客户端确实在上述任何一处之外，将 `hdcPath` 设为它的绝对路径。
 
-| Tool | What it does |
+## 工具
+
+| 工具 | 作用 |
 |---|---|
-| `hdc_devices` | List attached connect keys. Every other tool takes one as `device`. |
-| `hdc_screenshot` | Capture the screen and return the image itself. `save_path` also keeps a copy, named for the format the device produced (JPEG, or PNG when the capture had to fall back). |
-| `hdc_input` | `click`, `doubleClick`, `longClick`, `swipe`, `drag`, `fling`, `text`, `key` via `uitest uiInput`. |
-| `hdc_ui_tree` | `uitest dumpLayout`, reported as type, text, bounds, and the center point to tap. |
-| `hdc_app` | `install`, `uninstall`, `start`, `stop`, `current`, `list`. |
-| `hdc_log` | `hilog -z`, filtered by keyword or by crash markers. |
-| `hdc_file` | `file send`, `file recv`, or an arbitrary device `shell` command. |
-| `hdc_record` | Capture frames for a bounded length and join them into a local `.mp4`. |
+| `hdc_devices` | 列出已连接的 connect key，其它工具以 `device` 参数接收。 |
+| `hdc_screenshot` | 截屏并直接返回图像本身。`save_path` 同时保留一份副本，按设备产出的格式命名（JPEG，或必须回退时的 PNG）。 |
+| `hdc_input` | 经 `uitest uiInput` 执行 `click`、`doubleClick`、`longClick`、`swipe`、`drag`、`fling`、`text`、`key`。 |
+| `hdc_ui_tree` | `uitest dumpLayout`，报告类型、文本、边界以及可点按的中心点。 |
+| `hdc_app` | `install`、`uninstall`、`start`、`stop`、`current`、`list`。 |
+| `hdc_log` | `hilog -z`，按关键词或崩溃标记过滤。 |
+| `hdc_file` | `file send`、`file recv`，或任意设备 `shell` 命令。 |
+| `hdc_record` | 在限定时长内抓帧，合成到本地 `.mp4`。 |
 
-Each tool finds the client and the device on its own, so no setup call is
-needed. With several devices attached, pass `device`; with exactly one, omit it.
+每个工具自行定位客户端与设备，无需初始化调用。连接多台设备时传 `device`；只有一台时省略。
 
-## Configuration
+## 配置
 
-| Key | Meaning |
+| 键 | 含义 |
 |---|---|
-| `hdcPath` | Absolute path of the `hdc` executable. Omit to use the default search. |
-| `downloadDir` | Directory for received files, panel screenshots, and recordings. Defaults to the session directory. |
-| `ffmpegPath` | Absolute path of `ffmpeg`, used to join a recording into an mp4. Omit to use the default search. |
+| `hdcPath` | `hdc` 可执行文件的绝对路径。省略则使用默认搜索。 |
+| `downloadDir` | 接收文件、面板截图和录制的存放目录。默认为会话目录。 |
+| `ffmpegPath` | `ffmpeg` 的绝对路径，用于把录制合成 mp4。省略则使用默认搜索。 |
 
-All settings are optional strings. A value of another type is rejected when the
-plugin loads, naming the field, rather than failing partway through a device call.
+所有配置项都是可选字符串。其它类型的值会在插件加载时被拒绝并指出字段名，而不是在设备调用中途失败。
 
-## Behavior worth knowing
+## 值得了解的行为
 
-- **Calls act on a real device immediately.** A tap, an install, or a stop is a
-  real change, not a preview.
-- **Screenshots are pixels, not controls.** Coordinates for `hdc_input` are
-  device pixels measured on the screenshot. When a control is hard to hit, use
-  `hdc_ui_tree` to read its exact bounds.
-- **A missing device is reported, not guessed.** With no device attached, calls
-  fail with a message naming the problem; with several, they name the choices. A
-  `device` key that only prefixes several attachments is reported as ambiguous
-  rather than absent, so lengthening the key is the obvious next step.
-- **The hierarchy keeps unlabeled controls.** `hdc_ui_tree` shows labeled nodes
-  and every clickable node, so an icon button with no text, id, or description
-  still appears with the point to tap. Pass `all_nodes` to include the plain
-  containers as well.
-- **The panel draws the hierarchy, the tool prints it flat.** One dump answers
-  `/hdc/uitree` twice: `content` is one line per node, which is what a model
-  reads well, and `rows` carries the same nodes with their depth and whether
-  they have children, which is what the panel needs to indent and fold. Depth
-  counts kept ancestors only, not the document's own depth: a real screen puts a
-  labeled `Text` under twenty containers, so drawing the raw depth would spend
-  the whole column on indentation. Folding stays in the panel — the caret is its
-  own button, because a press anywhere else on the row is a tap on the device.
-- **A tap costs one device round trip, not two.** Every device call has to resolve
-  which device it targets, and that resolution is a `hdc list targets` spawn. On
-  the panel's click path that would double the work behind every tap, so the
-  listing is reused for about a second. Only a non-empty answer is kept — an
-  empty one would hide a device plugged in a moment later — and the explicit
-  listings (`hdc_devices`, the panel's refresh button) always ask the device, so
-  "what is attached right now" is never a cached guess.
-- **Screenshot capture tries two commands.** `snapshot_display` is preferred and
-  `uitest screenCap` is the fallback, because which exists varies by version.
-  Each is named with the suffix it accepts: `snapshot_display` refuses anything
-  but `.jpeg`, while `uitest screenCap` ignores the suffix and writes PNG. The
-  media type is sniffed from the bytes, never taken from the file name.
-- **The picture is never larger than its stage.** The image is a direct child of
-  the stage and keeps the aspect ratio it was captured at, so `max-height: 100%`
-  means what it says. A wrapper or a minimum size would let it overflow, which
-  clips the picture *and* skews every tap: the click→device-pixel math divides by
-  the image's own box, so a box taller than what is drawn sends taps hundreds of
-  pixels away from where they were aimed.
-- **One connection carries a whole stream.** The live picture and a recording each
-  run one `hdc shell` loop that prints `FRAME <bytes>` and then the frame itself.
-  The Host splits on that declared length because an image contains newline bytes
-  and no delimiter could end a frame. A frame cut short at the end of a stream is
-  dropped rather than shown, so an interrupted read never paints as a broken
-  picture.
-- **A recording outlives a missing ffmpeg.** Without ffmpeg the frames are kept
-  under a `-frames` directory next to the requested path, still numbered, so the
-  recording is not lost — any video tool can encode it later.
-- **The picture is MJPEG in a plain `<img>`.** The live picture uses
-  `multipart/x-mixed-replace`, which lets the browser repaint the element as each
-  part arrives — no canvas, no decoder, no polling. Capture and recording results
-  are served by an opaque id from an in-memory registry, so the panel can offer a
-  download link without exposing an arbitrary local path over HTTP.
-- **Remote scratch files are cleaned up.** Temporary files under
-  `/data/local/tmp` are removed on every exit path, including a failed capture,
-  and the removal is awaited before the call returns.
-- **Logs are bounded by `hilog -z`.** `-z N` reads the last N lines and exits.
-  It cannot be combined with `-x`: hilog rejects that pair with
-  `Mutlti commands can't be used in combination [CODE: -31]`, and `-n` is not a
-  line-count flag at all.
+- **调用会立即作用于真实设备。** 点按、安装、停止都是真实变更，不是预览。
+- **截图是像素，不是控件。** `hdc_input` 的坐标是在截图上量取的设备像素。控件难以命中时，用 `hdc_ui_tree` 读取其精确边界。
+- **设备缺失会报告，不会猜测。** 没有连接设备时，调用失败并说明问题；有多台时，列出可选项。只作为多台设备公共前缀的 `device` key 会被报告为有歧义而不是不存在，因此加长该 key 就是下一步。
+- **层级保留无标签控件。** `hdc_ui_tree` 展示有标签的节点和所有可点击节点，因此没有文本、ID 或描述的图标按钮仍会出现并附带可点按的点位。传 `all_nodes` 可一并包含普通容器。
+- **面板绘制层级，工具平铺打印。** 一次 dump 会两次响应 `/hdc/uitree`：`content` 每行一个节点，适合模型阅读；`rows` 携带相同的节点以及深度和是否有子节点，供面板缩进和折叠。深度只计入保留的祖先，不含文档自身深度：真实屏幕会把一个带标签的 `Text` 放在二十层容器之下，若按原始深度绘制，整列都会被缩进占满。折叠由面板完成——折叠箭头是独立按钮，因为行内其它位置的按下等于在设备上点按。
+- **一次点按只花一次设备往返，而不是两次。** 每个设备调用都要解析目标设备，而解析是一次 `hdc list targets` 进程。在面板的点击路径上这会让每次点按的开销翻倍，因此列表结果复用约一秒。只保留非空结果——空结果会掩盖稍后插入的设备——而显式列表（`hdc_devices`、面板的刷新按钮）始终直接询问设备，因此「当前连接了什么」从不是缓存的猜测。
+- **截图尝试两条命令。** 优先 `snapshot_display`，回退 `uitest screenCap`，因为哪条存在随版本而变。两者都按各自接受的扩展名命名：`snapshot_display` 只接受 `.jpeg`，而 `uitest screenCap` 忽略扩展名并写入 PNG。媒体类型从字节嗅探，从不取自文件名。
+- **画面不会大于其容器。** 图像是容器的直接子元素，并保持采集时的宽高比，因此 `max-height: 100%` 名副其实。外包一层或设置最小尺寸都会让它溢出，既裁掉画面，也让每次点按偏移：点击到设备像素的换算以图像自身盒子为除数，盒子比实际绘制更高就会把点按发送到数百像素之外。
+- **一条连接承载整条流。** 实时画面和录制各自运行一个 `hdc shell` 循环，先打印 `FRAME <bytes>` 再打印帧本身。Host 按这个声明的长度切分，因为图像中含有换行字节，没有任何分隔符能标记帧的结束。流末尾被截断的帧会被丢弃而不是显示，因此中断的读取不会画出破损画面。
+- **缺少 ffmpeg 时录制仍然保留。** 没有 ffmpeg 时，帧会保存在请求路径旁的 `-frames` 目录中，编号不变，录制不会丢失——任何视频工具之后都能编码。
+- **画面是普通 `<img>` 中的 MJPEG。** 实时画面使用 `multipart/x-mixed-replace`，浏览器在每个部分到达时重绘元素——无需 canvas、解码器或轮询。截图和录制产物由内存注册表的不透明 ID 提供，面板因此可以提供下载链接，而不必通过 HTTP 暴露任意本地路径。
+- **远端临时文件会被清理。** `/data/local/tmp` 下的临时文件在每条退出路径上都会删除，包括采集失败时，且删除在调用返回前完成。
+- **日志由 `hilog -z` 限定。** `-z N` 读取最后 N 行后退出。它不能与 `-x` 组合：hilog 会以
+  `Mutlti commands can't be used in combination [CODE: -31]` 拒绝这一组合，而 `-n` 根本不是行数参数。
 
-### Why the picture runs at a few frames per second
+### 为什么画面只有每秒数帧
 
-This HarmonyOS line ships no screen recorder. On a HarmonyOS 7.0.0 phone there is
-no `screenrecord` binary anywhere on the device, and `uitest` has no recording
-subcommand (`uiRecord` records *operations*, not pixels). The only way to get
-motion off the device is to capture stills in sequence and join them on the Host,
-which is what this plugin does.
+该 HarmonyOS 版本不提供录屏器。在 HarmonyOS 7.0.0 手机上，设备内任何位置都没有 `screenrecord` 二进制，`uitest` 也没有录制子命令（`uiRecord` 录的是**操作**，不是像素）。唯一能拿到动态画面的方式是连续采集静态帧并在 Host 上合成，本插件采用的就是这个方式。
 
-That sets the ceiling, and the number is worth knowing exactly. One
-`snapshot_display` frame takes **0.4–0.7 s**, and the cost is the RenderService
-round trip, not the pixels: a frame 480 px wide and one at the full 1216×2688
-take almost the same time. Capturing smaller therefore buys no speed, only blur,
-so the picture captures at the device's own resolution.
+这决定了上限，且具体数值值得明确。一帧 `snapshot_display` 耗时 **0.4–0.7 s**，开销在 RenderService 往返而不是像素：480 px 宽的帧与全尺寸 1216×2688 的帧耗时几乎相同。因此采集更小的帧不会更快，只会更模糊，画面按设备自身分辨率采集。
 
-What does help is overlapping captures, because each is a separate process
-waiting on the same service. The live picture keeps four captures in flight and
-emits them in order, which on that phone turns 1.5 frames per second into about
-**4–6**, depending on the link. A recording stays strictly sequential, because
-its frames must land in the order they were taken.
+有用的是重叠采集，因为每次采集都是等待同一服务的独立进程。实时画面保持四次采集在途并按序发出，在那台手机上把 1.5 帧每秒提升到约 **4–6** 帧每秒，具体取决于链路。录制保持严格串行，因为其帧必须按采集顺序落盘。
 
-The rate is measured, not assumed: a recording is played back at the rate its
-frames actually arrived, so it lasts about as long as the time it recorded. It
-moves in steps rather than smoothly, and that is a property of the device rather
-than a setting this plugin can raise.
+帧率是实测而非假定：录制按帧实际到达的速率回放，因此时长与实际录制时间相当。画面跳跃前进而非平滑，这是设备的属性，不是本插件能调高的设置。
 
-## Limits
+## 限制
 
-- A recording downloads a video; it cannot be viewed in the conversation.
-- Motion is a few frames per second, for the reason above.
-- The control tree reflects the accessibility tree, so a drawn-only element
-  without a semantic node will not appear in it.
-- Exercised on a HarmonyOS device (`hdc` 3.2.0f, HarmonyOS 7.0.0) for device
-  listing, screenshot, touch input, hierarchy dump, foreground mission listing,
-  log reading, the live stream, and recording to a real H.264 mp4. Package
-  install and uninstall and file transfer are covered only by the fake client,
-  not yet by a physical device.
+- 录制产出的是视频文件，无法在对话中查看。
+- 动态画面为每秒数帧，原因见上文。
+- 控件树反映无障碍树，因此仅绘制、没有语义节点的元素不会出现在其中。
+- 已在 HarmonyOS 设备（`hdc` 3.2.0f，HarmonyOS 7.0.0）上验证设备列表、截图、触摸输入、层级导出、前台任务列表、日志读取、实时流，以及录制为真实 H.264 mp4。应用安装、卸载与文件传输仅由模拟客户端覆盖，尚未在物理设备上验证。
 
-## Install
+## 安装
 
-Install this directory through **Plugins** > **Add plugin**, or with
-`plugin_manager` `install_bundle` and this path as the target. Replacing an
-already-installed copy needs a restart to load the new module generation.
+通过 **Plugins** > **Add plugin** 安装本目录，或用 `plugin_manager` 的 `install_bundle` 以本路径为目标。替换已安装的副本需要重启才能加载新的模块代际。
 
-## Development
+## 开发
 
 ```sh
-npm test          # 156 offline tests: tools, routes, framing, the panel's gestures, and a fake hdc
-npm run test:schema   # tool and config schemas, checked with the installed harness
+npm test              # 159 项离线测试：工具、路由、分帧、面板手势，以及模拟 hdc
+npm run test:schema   # 工具与配置 schema，用已安装的 harness 校验
 ```
 
-`npm run test:schema` needs the running DSH installation: the harness package is
-inside `app.asar`, so the script runs under Electron's Node runtime with the
-`DSH_NODE_EXECUTABLE` and `DSH_INSTALL_DIR` variables the session provides.
+`npm run test:schema` 需要运行中的 DSH 安装：harness 包位于 `app.asar` 内，因此脚本运行在 Electron 的 Node 运行时下，并使用会话提供的 `DSH_NODE_EXECUTABLE` 与 `DSH_INSTALL_DIR` 变量。
