@@ -4,9 +4,11 @@ import test from 'node:test'
 import { mkdtemp, writeFile, chmod, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { packRpcMessage, resetDaemonSessions, tryDaemonInput, tryOpenDaemonFrameStream } from '../lib/daemon.js'
+import { hasActiveDaemonSession, packRpcMessage, resetDaemonSessions, tryDaemonInput, tryOpenDaemonFrameStream } from '../lib/daemon.js'
 import { discoverHdc, forgetHdcCache } from '../lib/hdc.js'
 import { latestStreamFrame, trackStreamLatest } from '../lib/frames.js'
+import { input as serviceInput } from '../lib/service.js'
+import { invalidateTargets } from '../lib/tools.js'
 
 const JPEG = Buffer.from(
   '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj'
@@ -207,6 +209,76 @@ test('ensureDaemonPort replaces a stale fport forward that refuses TCP connectio
     assert.ok(activePort > 0 && livePort > 0)
   } finally {
     resetDaemonSessions()
+    await new Promise((resolve) => server.close(resolve))
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('live touch skips hdc list targets once an active daemon session exists', async () => {
+  resetDaemonSessions()
+  invalidateTargets()
+  const server = net.createServer((socket) => {
+    let buf = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk])
+      const head = Buffer.from('_uitestkit_rpc_message_head_')
+      const tail = Buffer.from('_uitestkit_rpc_message_tail_')
+      for (;;) {
+        const hi = buf.indexOf(head)
+        if (hi < 0) break
+        const ti = buf.indexOf(tail, hi + head.length + 8)
+        if (ti < 0) break
+        const len = buf.readUInt32BE(hi + head.length + 4)
+        const msg = JSON.parse(buf.subarray(hi + head.length + 8, hi + head.length + 8 + len).toString('utf8'))
+        buf = buf.subarray(ti + tail.length)
+        if (msg.method === 'callHypiumApi' && msg.params.api === 'Driver.create') {
+          socket.write('{"result":"Driver#0","pts":1}\n')
+        } else {
+          socket.write('{"result":null,"pts":2}\n')
+        }
+      }
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-fast-touch-'))
+  const logFile = path.join(dir, 'hdc.log')
+  const fakeHdc = path.join(dir, 'hdc')
+  await writeFile(fakeHdc, [
+    '#!/bin/sh',
+    `echo "$@" >> ${JSON.stringify(logFile)}`,
+    'if [ "$1" = "list" ] && [ "$2" = "targets" ]; then',
+    '  echo "FakeSer"',
+    '  exit 0',
+    'fi',
+    'shift 2 2>/dev/null || true',
+    'if [ "$1" = "fport" ] && [ "$2" = "ls" ]; then',
+    `  echo "FakeSer tcp:${port} localabstract:uitest_socket [Forward]"`,
+    '  exit 0',
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'))
+  await chmod(fakeHdc, 0o755)
+
+  try {
+    assert.equal(hasActiveDaemonSession('FakeSer'), false)
+    await serviceInput({ hdcPath: fakeHdc }, 'FakeSer', { action: 'touchDown', x: 10, y: 20 })
+    assert.equal(hasActiveDaemonSession('FakeSer'), true)
+
+    // Even when the targets cache is cleared, touchMove/touchUp use the open session directly.
+    invalidateTargets()
+    await serviceInput({ hdcPath: fakeHdc }, 'FakeSer', { action: 'touchMove', x: 30, y: 80 })
+    await serviceInput({ hdcPath: fakeHdc }, 'FakeSer', { action: 'touchUp', x: 30, y: 80 })
+
+    const { readFile } = await import('node:fs/promises')
+    const lines = (await readFile(logFile, 'utf8')).split('\n').filter(Boolean)
+    const listings = lines.filter((line) => line === 'list targets')
+    assert.equal(listings.length, 1, `expected 1 list targets call, got ${listings.length}: ${lines.join('; ')}`)
+  } finally {
+    resetDaemonSessions()
+    invalidateTargets()
     await new Promise((resolve) => server.close(resolve))
     await rm(dir, { recursive: true, force: true })
   }
