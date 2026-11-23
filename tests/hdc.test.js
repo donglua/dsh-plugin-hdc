@@ -18,6 +18,7 @@ import {
   clip,
   discoverHdc,
   forgetLoginShellCache,
+  normalizeRemoteAddress,
   parseTargets,
   selectDevice,
   shq,
@@ -32,6 +33,20 @@ test('parseTargets drops the empty marker and banner lines', () => {
     parseTargets('[Empty]\t hdc\n127.0.0.1:5555\n'),
     ['127.0.0.1:5555'],
   )
+})
+
+test('normalizeRemoteAddress accepts hosts, ports, and IPv6 literals', () => {
+  assert.equal(normalizeRemoteAddress(' 192.168.1.8:8710 '), '192.168.1.8:8710')
+  assert.equal(normalizeRemoteAddress('phone.local'), 'phone.local:8710')
+  assert.equal(normalizeRemoteAddress('::1'), '[::1]:8710')
+  assert.equal(normalizeRemoteAddress('[2001:db8::1]:9000'), '[2001:db8::1]:9000')
+})
+
+test('normalizeRemoteAddress rejects malformed endpoints', () => {
+  const invalid = ['', ' ', '-t', 'host name', 'http://phone', 'host:', '[::1', '[phone]', 'host:0', 'host:65536', 'host:1.5']
+  for (const value of invalid) {
+    assert.throws(() => normalizeRemoteAddress(value), (error) => error.code === 'HDC_BAD_ARGS')
+  }
 })
 
 test('selectDevice takes the only device when none is requested', () => {

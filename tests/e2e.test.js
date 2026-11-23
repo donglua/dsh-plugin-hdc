@@ -24,8 +24,9 @@ chmodSync(fakeHdc, 0o755)
  *
  * @param options.mode - `device` or `empty`, forwarded to the fake.
  * @param options.services - extra services the tools look up.
+ * @param options.remoteAddress - optional wireless target from plugin config.
  */
-async function harness({ mode = 'device', services = {} } = {}) {
+async function harness({ mode = 'device', services = {}, remoteAddress } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-e2e-'))
   process.env.DSH_HDC_FAKE_DIR = dir
   process.env.DSH_HDC_FAKE_MODE = mode
@@ -43,8 +44,8 @@ async function harness({ mode = 'device', services = {} } = {}) {
     },
     get: (name) => services[name],
   }
-  registerTools(ctx, { hdcPath: fakeHdc, downloadDir: dir })
-  return { tools: registered, dir, cleanup: () => rm(dir, { recursive: true, force: true }) }
+  registerTools(ctx, { hdcPath: fakeHdc, downloadDir: dir, ...remoteAddress === undefined ? {} : { remoteAddress } })
+  return { tools: registered, dir, remoteAddress, cleanup: () => rm(dir, { recursive: true, force: true }) }
 }
 
 /** A tool run context. */
@@ -79,6 +80,47 @@ test('devices are listed through the client', async () => {
     assert.deepEqual(value.devices, ['FakePhone123'])
     assert.equal(value.hdcPath, fakeHdc)
   } finally {
+    await h.cleanup()
+  }
+})
+
+test('remoteAddress attaches on demand for both tools and panel services', async () => {
+  const remoteAddress = '192.168.1.8:8710'
+  const h = await harness({ mode: 'empty', remoteAddress })
+  const log = path.join(h.dir, 'calls.log')
+  process.env.DSH_HDC_FAKE_LOG = log
+  try {
+    const listed = await h.tools.get('hdc_devices').execute({}, exec())
+    assert.deepEqual(listed.devices, [remoteAddress])
+
+    // The next operation sees the target already attached and does not tconn again.
+    const tapped = await h.tools.get('hdc_input').execute({ action: 'click', x: 1, y: 2 }, exec())
+    assert.equal(tapped.device, remoteAddress)
+
+    // HTTP panel services share the same configuration-driven preparation.
+    const { listDevices } = await import('../lib/service.js')
+    const panel = await listDevices({ hdcPath: fakeHdc, remoteAddress }, exec().signal)
+    assert.deepEqual(panel.devices, [remoteAddress])
+
+    const lines = (await readFile(log, 'utf8')).split('\n').filter(Boolean)
+    assert.equal(lines.filter((line) => line.startsWith('tconn ')).length, 1)
+    assert.ok(lines.some((line) => line === `tconn tconn ${remoteAddress}`))
+  } finally {
+    delete process.env.DSH_HDC_FAKE_LOG
+    await h.cleanup()
+  }
+})
+
+test('a target missing after tconn never falls back to another device', async () => {
+  const h = await harness({ mode: 'device', remoteAddress: '192.168.1.8:8710' })
+  process.env.DSH_HDC_FAKE_TCONN_NOLIST = '1'
+  try {
+    await assert.rejects(
+      () => h.tools.get('hdc_devices').execute({}, exec()),
+      /192\.168\.1\.8:8710 is not attached; attached: FakePhone123/u,
+    )
+  } finally {
+    delete process.env.DSH_HDC_FAKE_TCONN_NOLIST
     await h.cleanup()
   }
 })

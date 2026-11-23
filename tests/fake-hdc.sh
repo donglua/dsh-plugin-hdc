@@ -46,11 +46,23 @@ if [ -n "${DSH_HDC_FAKE_LOG:-}" ]; then
 fi
 
 case "${1:-}" in
+  tconn)
+    if [ "${DSH_HDC_FAKE_TCONN_NOLIST:-0}" != "1" ]; then
+      printf '%s\n' "$2" > "$scratch/remote-target"
+    fi
+    printf 'Connect OK\n'
+    exit 0
+    ;;
   list)
     if [ "$mode" = "empty" ]; then
-      printf '[Empty]\n'
+      if [ -f "$scratch/remote-target" ]; then
+        cat "$scratch/remote-target"
+      else
+        printf '[Empty]\n'
+      fi
     else
       printf 'FakePhone123\n'
+      if [ -f "$scratch/remote-target" ]; then cat "$scratch/remote-target"; fi
     fi
     exit 0
     ;;

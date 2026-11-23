@@ -62,6 +62,12 @@ if (standard === undefined) {
 } else if (standard.validate({ hdcPath: 5 }).issues === undefined) {
   failed = true
   console.error('FAIL Config: accepts a non-string hdcPath')
+} else if (standard.validate({ remoteAddress: ' phone.local:8710 ' }).value.remoteAddress !== 'phone.local:8710') {
+  failed = true
+  console.error('FAIL Config: does not preserve a trimmed remoteAddress')
+} else if (standard.validate({ remoteAddress: 'http://phone.local' }).issues === undefined) {
+  failed = true
+  console.error('FAIL Config: accepts a malformed remoteAddress')
 } else {
   console.log('ok  Config')
 }
