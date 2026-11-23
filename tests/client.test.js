@@ -769,7 +769,7 @@ test('a Host that answers only flat content still renders rows', async () => {
  * live touch actions).
  */
 async function pictureWithInputs(options = {}) {
-  const { liveTouch = true } = options
+  const { liveTouch = true, unavailableCode = 'HDC_DAEMON_UNAVAILABLE' } = options
   const inputCalls = []
   const { pages, react, clock } = loadClient(async (url, init = {}) => {
     const pathname = String(url).split('?')[0]
@@ -782,11 +782,16 @@ async function pictureWithInputs(options = {}) {
       if (!liveTouch && (body.action === 'touchDown' || body.action === 'touchMove' || body.action === 'touchUp')) {
         return {
           ok: false,
-          status: 503,
+          status: unavailableCode === 'HDC_BAD_ARGS' ? 400 : 503,
           clone() {
             return {
               json: async () => ({
-                error: { code: 'HDC_DAEMON_UNAVAILABLE', message: 'live touch input requires the uitest daemon on the device' },
+                error: {
+                  code: unavailableCode,
+                  message: unavailableCode === 'HDC_BAD_ARGS'
+                    ? `unsupported input action: ${body.action}`
+                    : 'live touch input requires the uitest daemon on the device',
+                },
               }),
             }
           },
@@ -858,6 +863,14 @@ test('a drag falls back to a swipe when live daemon touch is unavailable', async
     `velocity out of the range the device accepts: ${call.velocity}`,
   )
   assert.equal(call.duration_ms, undefined, 'a swipe must not send a duration')
+})
+
+test('a drag falls back cleanly when an older Host rejects touchDown with HDC_BAD_ARGS', async () => {
+  const { inputCalls, gesture } = await pictureWithInputs({ liveTouch: false, unavailableCode: 'HDC_BAD_ARGS' })
+  gesture({ x: 10, y: 20 }, { x: 60, y: 150 })
+  await settle()
+  const swipes = inputCalls.filter((call) => call.action === 'swipe')
+  assert.equal(swipes.length, 1, 'an older Host rejecting touchDown must fall back to swipe without failing on touchUp')
 })
 
 test('a swipe is replayed at the velocity the device actually reads', () => {
