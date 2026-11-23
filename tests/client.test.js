@@ -985,6 +985,27 @@ test('fallback swipe uses trailing release speed for a flick and stays slow afte
     await settle()
     assert.equal(inputCalls.at(-1).action, 'swipe')
     assert.equal(inputCalls.at(-1).velocity, 200)
+
+    // Slow drag followed by a same-tick flick at release keeps the high flick speed instead of using fullElapsed.
+    picture.props.onPointerDown({ button: 0, pointerId: 4, pointerType: 'touch', clientX: 10, clientY: 60, currentTarget: image })
+    clock.offsetMs += 900
+    picture.props.onPointerMove({ pointerId: 4, pointerType: 'touch', clientX: 30, clientY: 60, currentTarget: image })
+    picture.props.onPointerUp({ button: 0, pointerId: 4, pointerType: 'touch', clientX: 80, clientY: 60, currentTarget: image })
+    await settle()
+    assert.equal(inputCalls.at(-1).action, 'swipe')
+    assert.equal(inputCalls.at(-1).velocity, 40_000)
+
+    // Drag where the preceding move fell just outside the trailing window and release shares the last move point.
+    picture.props.onPointerDown({ button: 0, pointerId: 5, pointerType: 'touch', clientX: 10, clientY: 80, currentTarget: image })
+    clock.offsetMs += 770
+    picture.props.onPointerMove({ pointerId: 5, pointerType: 'touch', clientX: 30, clientY: 80, currentTarget: image })
+    clock.offsetMs += 130
+    picture.props.onPointerMove({ pointerId: 5, pointerType: 'touch', clientX: 90, clientY: 80, currentTarget: image })
+    clock.offsetMs += 5
+    picture.props.onPointerUp({ button: 0, pointerId: 5, pointerType: 'touch', clientX: 90, clientY: 80, currentTarget: image })
+    await settle()
+    assert.equal(inputCalls.at(-1).action, 'swipe')
+    assert.equal(inputCalls.at(-1).velocity, Math.round((60 / 130) * 1000))
   } finally {
     clock.offsetMs = 0
   }
