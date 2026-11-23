@@ -279,6 +279,18 @@ test('a missing device is 503 and a rejected command is 502', async () => {
   const failedRes = await call(broken, '/hdc/input', { method: 'POST', body: JSON.stringify({ action: 'click' }) })
   assert.equal(failedRes.statusCode, 502)
   assert.equal(failedRes.json().error.code, 'HDC_COMMAND_FAILED')
+
+  const daemonUnavailable = new Error('live touch input requires the uitest daemon on the device')
+  daemonUnavailable.code = 'HDC_DAEMON_UNAVAILABLE'
+  const noDaemon = createHandler({
+    services: services({ async input() { throw daemonUnavailable } }),
+  })
+  const noDaemonRes = await call(noDaemon, '/hdc/input', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'touchDown', x: 10, y: 20 }),
+  })
+  assert.equal(noDaemonRes.statusCode, 503)
+  assert.equal(noDaemonRes.json().error.code, 'HDC_DAEMON_UNAVAILABLE')
 })
 
 test('an unexpected throw is a 500 and never escapes the handler', async () => {
