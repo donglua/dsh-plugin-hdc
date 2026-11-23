@@ -779,7 +779,7 @@ async function pictureWithInputs(options = {}) {
     if (pathname === '/hdc/input') {
       const body = JSON.parse(String(init.body ?? '{}'))
       inputCalls.push(body)
-      if (!liveTouch && (body.action === 'touchDown' || body.action === 'touchMove' || body.action === 'touchUp')) {
+      if (!liveTouch && (body.action === 'touchDown' || body.action === 'touchMove' || body.action === 'touchUp' || body.action === 'touchBatch')) {
         return {
           ok: false,
           status: unavailableCode === 'HDC_BAD_ARGS' ? 400 : 503,
@@ -833,15 +833,76 @@ async function pictureWithInputs(options = {}) {
   return { picture, image, inputCalls, gesture, react, page, clock, reRender: () => react.render(page, { t: (key) => key }) }
 }
 
-test('a drag past the threshold streams live touchDown, touchMove, touchUp in device pixels', async () => {
+test('a drag past the threshold streams live touchDown and batched release in device pixels', async () => {
   const { inputCalls, gesture } = await pictureWithInputs({ liveTouch: true })
   gesture({ x: 10, y: 20 }, { x: 60, y: 150 })
   await settle()
-  assert.deepEqual(inputCalls, [
-    { device: 'phone-1', action: 'touchDown', x: 10, y: 20 },
-    { device: 'phone-1', action: 'touchMove', x: 60, y: 150 },
-    { device: 'phone-1', action: 'touchUp', x: 60, y: 150 },
-  ])
+  assert.equal(inputCalls.length, 2)
+  assert.deepEqual(inputCalls[0], { device: 'phone-1', action: 'touchDown', x: 10, y: 20 })
+  assert.equal(inputCalls[1].device, 'phone-1')
+  assert.equal(inputCalls[1].action, 'touchBatch')
+  const steps = inputCalls[1].steps
+  assert.ok(Array.isArray(steps) && steps.length >= 2)
+  assert.deepEqual(steps.at(-2), { action: 'touchMove', x: 60, y: 150, delayMs: steps.at(-2).delayMs })
+  assert.deepEqual(steps.at(-1), { action: 'touchUp', x: 60, y: 150, delayMs: 0 })
+})
+
+test('a quick flick whose touchDown is still queued collapses into a single swipe with trailing velocity', async () => {
+  const pending = []
+  const sent = []
+  const { pages, react, clock } = loadClient(async (url, init = {}) => {
+    const pathname = String(url).split('?')[0]
+    if (pathname === '/hdc/devices') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
+    }
+    if (pathname === '/hdc/input') {
+      const body = JSON.parse(String(init.body ?? '{}'))
+      sent.push(body)
+      return new Promise((resolve) => {
+        pending.push(() => resolve({ ok: true, status: 200, clone() { return { json: async () => ({ device: 'phone-1', command: 'ok' }) } } }))
+      })
+    }
+    return { ok: true, status: 200, clone() { return { json: async () => ({}) } } }
+  })
+  try {
+    const page = pages[0].component
+    react.render(page, { t: (key) => key })
+    await settle()
+    const { tree } = react.render(page, { t: (key) => key })
+    const picture = elementsOf(tree, 'hdci-shot')[0]
+    const bounds = { left: 0, top: 0, width: 100, height: 200 }
+    const image = {
+      naturalWidth: 100,
+      naturalHeight: 200,
+      getBoundingClientRect: () => bounds,
+      parentElement: { clientLeft: 0, clientTop: 0, getBoundingClientRect: () => bounds },
+    }
+
+    // Hold the queue busy with a prior tap while the quick flick happens.
+    picture.props.onPointerDown({ button: 0, pointerId: 1, pointerType: 'touch', clientX: 5, clientY: 5, currentTarget: image })
+    picture.props.onPointerUp({ button: 0, pointerId: 1, pointerType: 'touch', clientX: 5, clientY: 5, currentTarget: image })
+
+    picture.props.onPointerDown({ button: 0, pointerId: 2, pointerType: 'touch', clientX: 10, clientY: 20, currentTarget: image })
+    clock.offsetMs += 10
+    picture.props.onPointerMove({ pointerId: 2, pointerType: 'touch', clientX: 40, clientY: 80, currentTarget: image })
+    clock.offsetMs += 10
+    picture.props.onPointerUp({ button: 0, pointerId: 2, pointerType: 'touch', clientX: 70, clientY: 140, currentTarget: image })
+
+    while (pending.length > 0) {
+      pending.shift()()
+      await settle()
+    }
+    assert.equal(sent[0].action, 'click')
+    assert.equal(sent.length, 2, 'queued touchDown + touchMove must collapse into one swipe')
+    assert.equal(sent[1].action, 'swipe')
+    assert.equal(sent[1].x, 10)
+    assert.equal(sent[1].y, 20)
+    assert.equal(sent[1].to_x, 70)
+    assert.equal(sent[1].to_y, 140)
+    assert.ok(sent[1].velocity > 600)
+  } finally {
+    clock.offsetMs = 0
+  }
 })
 
 test('a drag falls back to a swipe when live daemon touch is unavailable', async () => {

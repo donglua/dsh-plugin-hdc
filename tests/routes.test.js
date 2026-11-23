@@ -222,6 +222,17 @@ test('input reads a JSON body and reaches the service', async () => {
   assert.deepEqual(fake.calls.at(-1)[2], { action: 'click', x: 10, y: 20 })
   assert.equal(fake.calls.at(-1)[1], 'dev-2')
   assert.deepEqual(res.json(), { device: 'dev-2', command: 'click', output: 'ok' })
+
+  const batchSteps = [
+    { action: 'touchMove', x: 30, y: 40, delayMs: 5 },
+    { action: 'touchUp', x: 30, y: 40, delayMs: 0 },
+  ]
+  const batchRes = await call(handler, '/hdc/input', {
+    method: 'POST',
+    body: JSON.stringify({ device: 'dev-2', action: 'touchBatch', steps: batchSteps }),
+  })
+  assert.equal(batchRes.statusCode, 200)
+  assert.deepEqual(fake.calls.at(-1)[2], { action: 'touchBatch', steps: batchSteps })
 })
 
 test('an input body without an action is 400', async () => {

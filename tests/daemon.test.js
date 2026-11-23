@@ -128,12 +128,23 @@ test('tryDaemonInput and tryOpenDaemonFrameStream talk to a forwarded uitest_soc
     assert.deepEqual(down, { command: 'touchDown 12 34', output: undefined })
     assert.deepEqual(move, { command: 'touchMove 56 78', output: undefined })
     assert.deepEqual(up, { command: 'touchUp 56 78', output: undefined })
+
+    const batch = await tryDaemonInput(fakeHdc, 'FakeSer', {
+      action: 'touchBatch',
+      steps: [
+        { action: 'touchMove', x: 80, y: 100, delayMs: 0 },
+        { action: 'touchUp', x: 80, y: 100, delayMs: 0 },
+      ],
+    })
+    assert.deepEqual(batch, { command: 'touchBatch 2', output: undefined })
     assert.deepEqual(
       receivedCalls.filter((m) => m.method === 'Gestures').map((m) => [m.params.api, m.params.args]),
       [
         ['touchDown', { x: 12, y: 34 }],
         ['touchMove', { x: 56, y: 78 }],
         ['touchUp', { x: 56, y: 78 }],
+        ['touchMove', { x: 80, y: 100 }],
+        ['touchUp', { x: 80, y: 100 }],
       ],
     )
 
@@ -276,6 +287,18 @@ test('live touch skips hdc list targets once an active daemon session exists', a
     const lines = (await readFile(logFile, 'utf8')).split('\n').filter(Boolean)
     const listings = lines.filter((line) => line === 'list targets')
     assert.equal(listings.length, 1, `expected 1 list targets call, got ${listings.length}: ${lines.join('; ')}`)
+
+    await assert.rejects(
+      () => serviceInput({ hdcPath: fakeHdc }, 'FakeSer', { action: 'touchBatch', steps: [] }),
+      (error) => error?.code === 'HDC_BAD_ARGS',
+    )
+    await assert.rejects(
+      () => serviceInput({ hdcPath: fakeHdc }, 'FakeSer', {
+        action: 'touchBatch',
+        steps: [{ action: 'click', x: 1, y: 2 }],
+      }),
+      (error) => error?.code === 'HDC_BAD_ARGS',
+    )
   } finally {
     resetDaemonSessions()
     invalidateTargets()
