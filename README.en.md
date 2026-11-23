@@ -78,8 +78,7 @@ available and are the way to do anything the panel does not show.
 
 ### How the client is located
 
-The search runs on every call, so installing an SDK or fixing an environment
-variable takes effect without restarting the Host. In order:
+The resolved path is cached and reused while it still exists on disk, re-searching automatically if it disappears, so installing an SDK or fixing an environment variable takes effect without restarting the Host. In order:
 
 1. `hdcPath` from the plugin configuration, when set and the file exists.
 2. The SDK root named by `DEVECO_SDK_HOME`, `HOS_SDK_HOME`,
@@ -154,15 +153,24 @@ plugin loads, naming the field, rather than failing partway through a device cal
 - **A tap costs one device round trip, not two.** Every device call has to resolve
   which device it targets, and that resolution is a `hdc list targets` spawn. On
   the panel's click path that would double the work behind every tap, so the
-  listing is reused for about a second. Only a non-empty answer is kept — an
-  empty one would hide a device plugged in a moment later — and the explicit
-  listings (`hdc_devices`, the panel's refresh button) always ask the device, so
-  "what is attached right now" is never a cached guess.
-- **Screenshot capture tries two commands.** `snapshot_display` is preferred and
-  `uitest screenCap` is the fallback, because which exists varies by version.
-  Each is named with the suffix it accepts: `snapshot_display` refuses anything
-  but `.jpeg`, while `uitest screenCap` ignores the suffix and writes PNG. The
-  media type is sniffed from the bytes, never taken from the file name.
+  listing is reused for about a second (including the pre-connect check when
+  `remoteAddress` is set). Only a non-empty answer is kept — an empty one would
+  hide a device plugged in a moment later — and the explicit listings
+  (`hdc_devices`, the panel's refresh button) always ask the device, so "what is
+  attached right now" is never a cached guess.
+- **Optional `@uitest_socket` persistent RPC fast path.** When
+  `/data/local/tmp/agent.so` is present on the device, the Host automatically
+  connects to `uitest start-daemon singleness` over `hdc fport` for low-latency
+  taps/swipes and change-driven live JPEG frames, falling back transparently to
+  the standard `hdc shell` path whenever unavailable.
+- **Single round-trip captures and active-stream reuse.** Both still screenshots
+  and `hdc_ui_tree` stream their output and clean up remote scratch files in
+  one `hdc shell` call (falling back to `file recv` only for non-JSON test
+  outputs). The panel's Screenshot button reuses a fresh (< 450 ms)
+  full-resolution frame from an active live stream with zero device round-trips.
+  Capture prefers `snapshot_display` (emitting the probe frame directly without
+  discarding it) and falls back to `uitest screenCap`, sniffing the media type
+  from the bytes rather than the file name.
 - **The picture is never larger than its stage.** The image is a direct child of
   the stage and keeps the aspect ratio it was captured at, so `max-height: 100%`
   means what it says. A wrapper or a minimum size would let it overflow, which
@@ -171,13 +179,15 @@ plugin loads, naming the field, rather than failing partway through a device cal
   pixels away from where they were aimed.
 - **One connection carries a whole stream.** The live picture and a recording each
   run one `hdc shell` loop that prints `FRAME <bytes>` and then the frame itself.
-  The Host splits on that declared length because an image contains newline bytes
-  and no delimiter could end a frame. A frame cut short at the end of a stream is
+  The Host splits on that declared length (via an incremental chunk queue to
+  avoid quadratic buffer copies) because an image contains newline bytes and no
+  delimiter could end a frame. A frame cut short at the end of a stream is
   dropped rather than shown, so an interrupted read never paints as a broken
   picture.
-- **A recording outlives a missing ffmpeg.** Without ffmpeg the frames are kept
-  under a `-frames` directory next to the requested path, still numbered, so the
-  recording is not lost — any video tool can encode it later.
+- **A recording outlives a missing ffmpeg.** Recordings write frames
+  asynchronously and encode with `ffmpeg -preset ultrafast`; without ffmpeg the
+  frames are kept under a `-frames` directory next to the requested path, still
+  numbered, so the recording is not lost — any video tool can encode it later.
 - **The picture is MJPEG in a plain `<img>`.** The live picture uses
   `multipart/x-mixed-replace`, which lets the browser repaint the element as each
   part arrives — no canvas, no decoder, no polling. Capture and recording results
@@ -237,7 +247,7 @@ already-installed copy needs a restart to load the new module generation.
 ## Development
 
 ```sh
-npm test          # 159 offline tests: tools, routes, framing, the panel's gestures, and a fake hdc
+npm test          # 167 offline tests: tools, routes, framing, daemon RPC, panel gestures, and fake hdc
 npm run test:schema   # tool and config schemas, checked with the installed harness
 ```
 
