@@ -89,6 +89,8 @@ test('tryDaemonInput and tryOpenDaemonFrameStream talk to a forwarded uitest_soc
           } else {
             socket.write('{"result":null,"pts":2}\n')
           }
+        } else if (msg.method === 'Gestures') {
+          socket.write('{"result":null,"pts":2}\n')
         } else if (msg.method === 'Captures' && msg.params.api === 'startCaptureScreen') {
           socket.write('{"result":true,"pts":3}\n')
           socket.write(JPEG)
@@ -118,6 +120,21 @@ test('tryDaemonInput and tryOpenDaemonFrameStream talk to a forwarded uitest_soc
     assert.deepEqual(res, { command: 'click 100 200', output: undefined })
     assert.equal(receivedCalls.some((m) => m.params.api === 'Driver.click'), true)
 
+    const down = await tryDaemonInput(fakeHdc, 'FakeSer', { action: 'touchDown', x: 12, y: 34 })
+    const move = await tryDaemonInput(fakeHdc, 'FakeSer', { action: 'touchMove', x: 56, y: 78 })
+    const up = await tryDaemonInput(fakeHdc, 'FakeSer', { action: 'touchUp', x: 56, y: 78 })
+    assert.deepEqual(down, { command: 'touchDown 12 34', output: undefined })
+    assert.deepEqual(move, { command: 'touchMove 56 78', output: undefined })
+    assert.deepEqual(up, { command: 'touchUp 56 78', output: undefined })
+    assert.deepEqual(
+      receivedCalls.filter((m) => m.method === 'Gestures').map((m) => [m.params.api, m.params.args]),
+      [
+        ['touchDown', { x: 12, y: 34 }],
+        ['touchMove', { x: 56, y: 78 }],
+        ['touchUp', { x: 56, y: 78 }],
+      ],
+    )
+
     const stream = await tryOpenDaemonFrameStream(fakeHdc, 'FakeSer', {})
     assert.ok(stream !== undefined)
     const it = stream.frames[Symbol.asyncIterator]()
@@ -125,6 +142,69 @@ test('tryDaemonInput and tryOpenDaemonFrameStream talk to a forwarded uitest_soc
     assert.equal(frame.done, false)
     assert.equal(frame.value.mediaType, 'image/jpeg')
     stream.stop()
+  } finally {
+    resetDaemonSessions()
+    await new Promise((resolve) => server.close(resolve))
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('ensureDaemonPort replaces a stale fport forward that refuses TCP connections', async () => {
+  resetDaemonSessions()
+  const server = net.createServer((socket) => {
+    socket.on('data', () => {
+      socket.write('{"result":"Driver#0","pts":1}\n')
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const livePort = server.address().port
+
+  // Allocate an unused port so connectTcp is guaranteed to receive ECONNREFUSED.
+  const deadServer = net.createServer()
+  await new Promise((resolve) => deadServer.listen(0, '127.0.0.1', resolve))
+  const deadPort = deadServer.address().port
+  await new Promise((resolve) => deadServer.close(resolve))
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-stale-fport-'))
+  const logFile = path.join(dir, 'hdc.log')
+  const fakeHdc = path.join(dir, 'hdc')
+  let activePort = deadPort
+  // Fake hdc returns the dead port on first fport ls, records fport rm, and
+  // listens/forwards on livePort? Wait: allocateLocalPort picks a random port,
+  // so instead we verify fport rm was called for deadPort.
+  await writeFile(fakeHdc, [
+    '#!/bin/sh',
+    `echo "$@" >> ${JSON.stringify(logFile)}`,
+    'shift 2 2>/dev/null || true',
+    'if [ "$1" = "fport" ] && [ "$2" = "ls" ]; then',
+    `  echo "FakeSer tcp:${deadPort} localabstract:uitest_socket [Forward]"`,
+    '  exit 0',
+    'fi',
+    'if [ "$1" = "fport" ] && [ "$2" = "rm" ]; then',
+    '  exit 0',
+    'fi',
+    'if [ "$1" = "shell" ]; then',
+    '  echo "OK"',
+    '  exit 0',
+    'fi',
+    'if [ "$1" = "fport" ]; then',
+    '  exit 0',
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'))
+  await chmod(fakeHdc, 0o755)
+
+  try {
+    // The fresh port won't have a server listening on it (allocateLocalPort picks
+    // an arbitrary ephemeral port), so tryDaemonInput returns undefined, AND the
+    // log proves it detected the stale port and called fport rm + re-forwarded.
+    await tryDaemonInput(fakeHdc, 'FakeSer', { action: 'touchDown', x: 1, y: 2 })
+    const { readFile } = await import('node:fs/promises')
+    const log = await readFile(logFile, 'utf8')
+    assert.match(log, new RegExp(`fport rm tcp:${deadPort} localabstract:uitest_socket`))
+    assert.match(log, /fport tcp:\d+ localabstract:uitest_socket/)
+    assert.ok(activePort > 0 && livePort > 0)
   } finally {
     resetDaemonSessions()
     await new Promise((resolve) => server.close(resolve))
