@@ -414,7 +414,7 @@ test('a tap is queued, never dropped while another is in flight', () => {
   assert.equal(/if \(device === null \|\| inputBusy\) return/u.test(handler), false, 'the press handler must not drop a tap')
   // Input must go through a queue that drains in order.
   assert.match(source, /const queueRef = useRef\(\{ device: null, generation: 0, items: \[\], running: false, controller: null \}\)/u)
-  assert.match(source, /queue\.items\.push\(\{ payload, done, device \}\)/u)
+  assert.match(source, /queue\.items\.push\(\{\s*payload,\s*done,\s*device,/u)
   assert.match(source, /const item = queue\.items\.shift\(\)/u)
 })
 
@@ -764,9 +764,12 @@ test('a Host that answers only flat content still renders rows', async () => {
 
 /**
  * Render a panel that has one device, and return its live picture plus the
- * `/hdc/input` bodies it sends.
+ * `/hdc/input` bodies it sends. Pass `{ liveTouch: false }` to simulate a
+ * device without the uitest daemon (returning 503 HDC_DAEMON_UNAVAILABLE on
+ * live touch actions).
  */
-async function pictureWithInputs(routes = {}) {
+async function pictureWithInputs(options = {}) {
+  const { liveTouch = true } = options
   const inputCalls = []
   const { pages, react, clock } = loadClient(async (url, init = {}) => {
     const pathname = String(url).split('?')[0]
@@ -774,18 +777,27 @@ async function pictureWithInputs(routes = {}) {
       return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
     }
     if (pathname === '/hdc/input') {
-      inputCalls.push(JSON.parse(String(init.body ?? '{}')))
+      const body = JSON.parse(String(init.body ?? '{}'))
+      inputCalls.push(body)
+      if (!liveTouch && (body.action === 'touchDown' || body.action === 'touchMove' || body.action === 'touchUp')) {
+        return {
+          ok: false,
+          status: 503,
+          clone() {
+            return {
+              json: async () => ({
+                error: { code: 'HDC_DAEMON_UNAVAILABLE', message: 'live touch input requires the uitest daemon on the device' },
+              }),
+            }
+          },
+        }
+      }
       return { ok: true, status: 200, clone() { return { json: async () => ({ device: 'phone-1', command: 'ok' }) } } }
-    }
-    const handler = routes[pathname]
-    if (handler !== undefined) {
-      const body = await handler(init)
-      return { ok: true, status: 200, clone() { return { json: async () => body } } }
     }
     return { ok: true, status: 200, clone() { return { json: async () => ({}) } } }
   })
   const page = pages[0].component
-  react.render(page, { t: (key) => key, ...{ } })
+  react.render(page, { t: (key) => key })
   await settle()
   const { tree } = react.render(page, { t: (key) => key })
   const picture = elementsOf(tree, 'hdci-shot')[0]
@@ -804,8 +816,8 @@ async function pictureWithInputs(routes = {}) {
     releasePointerCapture(id) { this.captured.push(`release:${id}`) },
   }
   /** Drive a full gesture in display pixels. */
-  function gesture(from, to, options = {}) {
-    const { pointerId = 1, moves = [to], cancel = false, pointerType = 'touch' } = options
+  function gesture(from, to, gestureOptions = {}) {
+    const { pointerId = 1, moves = [to], cancel = false, pointerType = 'touch' } = gestureOptions
     picture.props.onPointerDown({ button: 0, pointerId, pointerType, clientX: from.x, clientY: from.y, currentTarget: image })
     for (const point of moves) {
       picture.props.onPointerMove({ pointerId, pointerType, clientX: point.x, clientY: point.y, currentTarget: image })
@@ -816,21 +828,30 @@ async function pictureWithInputs(routes = {}) {
   return { picture, image, inputCalls, gesture, react, page, clock, reRender: () => react.render(page, { t: (key) => key }) }
 }
 
-test('a drag past the threshold is sent as a swipe, in device pixels', async () => {
-  const { inputCalls, gesture } = await pictureWithInputs()
-  // From (10, 20) to (60, 150) on a picture drawn at its own size.
+test('a drag past the threshold streams live touchDown, touchMove, touchUp in device pixels', async () => {
+  const { inputCalls, gesture } = await pictureWithInputs({ liveTouch: true })
   gesture({ x: 10, y: 20 }, { x: 60, y: 150 })
   await settle()
-  assert.equal(inputCalls.length, 1, 'a drag must send exactly one input')
-  const [call] = inputCalls
+  assert.deepEqual(inputCalls, [
+    { device: 'phone-1', action: 'touchDown', x: 10, y: 20 },
+    { device: 'phone-1', action: 'touchMove', x: 60, y: 150 },
+    { device: 'phone-1', action: 'touchUp', x: 60, y: 150 },
+  ])
+})
+
+test('a drag falls back to a swipe when live daemon touch is unavailable', async () => {
+  const { inputCalls, gesture } = await pictureWithInputs({ liveTouch: false })
+  // First drag probes touchDown, sees HDC_DAEMON_UNAVAILABLE, and falls back to swipe.
+  gesture({ x: 10, y: 20 }, { x: 60, y: 150 })
+  await settle()
+  const swipes = inputCalls.filter((call) => call.action === 'swipe')
+  assert.equal(swipes.length, 1, 'fallback must send one swipe on release')
+  const [call] = swipes
   assert.equal(call.device, 'phone-1')
-  assert.equal(call.action, 'swipe')
   assert.equal(call.x, 10)
   assert.equal(call.y, 20)
   assert.equal(call.to_x, 60)
   assert.equal(call.to_y, 150)
-  // The velocity follows how fast the gesture was made, so a flick stays a flick
-  // instead of becoming a slow drag.
   assert.ok(Number.isInteger(call.velocity), 'the swipe must carry an integer velocity')
   assert.ok(
     call.velocity >= 200 && call.velocity <= 40_000,
@@ -853,14 +874,47 @@ test('a swipe is replayed at the velocity the device actually reads', () => {
   // The pace is derived from distance and elapsed time, then clamped to the band
   // the device accepts so it is never silently swapped for the default one.
   assert.match(source, /clamp\(observed, SWIPE_MIN_SPEED_PX_PER_S, SWIPE_MAX_SPEED_PX_PER_S\)/u)
-  assert.match(source, /velocity: swipeVelocity\(/u)
+  assert.match(source, /velocity: trailingSwipeVelocity\(/u)
   // The old, wrong shape must not come back.
   assert.doesNotMatch(source, /duration_ms: swipeDuration\(/u)
   assert.doesNotMatch(source, /function swipeDuration\(/u)
   // The clock starts when the press *becomes* a swipe, not when it went down.
-  assert.match(source, /if \(!gesture\.swiping\) gesture\.swipeStartedAt = Date\.now\(\)/u)
+  assert.match(source, /if \(!gesture\.swiping\) gesture\.swipeStartedAt = now/u)
 })
 
+test('fallback swipe uses trailing release speed for a flick and stays slow after a pause', async () => {
+  const { picture, image, inputCalls, clock } = await pictureWithInputs({ liveTouch: false })
+  try {
+    // Probe once so fallback mode is active.
+    picture.props.onPointerDown({ button: 0, pointerId: 1, pointerType: 'touch', clientX: 10, clientY: 10, currentTarget: image })
+    picture.props.onPointerMove({ pointerId: 1, pointerType: 'touch', clientX: 40, clientY: 10, currentTarget: image })
+    picture.props.onPointerUp({ button: 0, pointerId: 1, pointerType: 'touch', clientX: 40, clientY: 10, currentTarget: image })
+    await settle()
+    inputCalls.length = 0
+
+    // Slow drag for 900 ms, then fast 50 px flick in 20 ms -> trailing speed = 2500 px/s.
+    picture.props.onPointerDown({ button: 0, pointerId: 2, pointerType: 'touch', clientX: 10, clientY: 20, currentTarget: image })
+    clock.offsetMs += 900
+    picture.props.onPointerMove({ pointerId: 2, pointerType: 'touch', clientX: 30, clientY: 20, currentTarget: image })
+    clock.offsetMs += 20
+    picture.props.onPointerUp({ button: 0, pointerId: 2, pointerType: 'touch', clientX: 80, clientY: 20, currentTarget: image })
+    await settle()
+    assert.equal(inputCalls.at(-1).action, 'swipe')
+    assert.equal(inputCalls.at(-1).velocity, 2500)
+
+    // Fast drag followed by a 200 ms pause before lifting -> slow speed (200 px/s), no accidental fling.
+    picture.props.onPointerDown({ button: 0, pointerId: 3, pointerType: 'touch', clientX: 10, clientY: 40, currentTarget: image })
+    clock.offsetMs += 20
+    picture.props.onPointerMove({ pointerId: 3, pointerType: 'touch', clientX: 90, clientY: 40, currentTarget: image })
+    clock.offsetMs += 200
+    picture.props.onPointerUp({ button: 0, pointerId: 3, pointerType: 'touch', clientX: 90, clientY: 40, currentTarget: image })
+    await settle()
+    assert.equal(inputCalls.at(-1).action, 'swipe')
+    assert.equal(inputCalls.at(-1).velocity, 200)
+  } finally {
+    clock.offsetMs = 0
+  }
+})
 
 test('a press that stays put is still sent as a tap, on release', async () => {
   const { inputCalls, gesture } = await pictureWithInputs()
@@ -874,53 +928,127 @@ test('a press that stays put is still sent as a tap, on release', async () => {
   assert.equal(inputCalls[0].y, 41)
 })
 
-test('a cancelled gesture sends nothing at all', async () => {
-  // A scroll, a pinch, or the window losing focus takes the gesture away. What
-  // the user meant is unknown then, and a guessed tap is a real press on a real
-  // device.
-  const { inputCalls, gesture } = await pictureWithInputs()
-  gesture({ x: 10, y: 10 }, { x: 90, y: 190 }, { cancel: true })
+test('a cancelled gesture before threshold sends nothing, and after touchDown releases with touchUp', async () => {
+  const preThreshold = await pictureWithInputs()
+  preThreshold.gesture({ x: 10, y: 10 }, { x: 12, y: 12 }, { cancel: true })
   await settle()
-  assert.deepEqual(inputCalls, [], 'a cancelled gesture must not reach the device')
+  assert.deepEqual(preThreshold.inputCalls, [], 'a pre-threshold cancelled gesture must not reach the device')
+
+  const postThreshold = await pictureWithInputs({ liveTouch: true })
+  postThreshold.gesture({ x: 10, y: 10 }, { x: 90, y: 190 }, { moves: [{ x: 60, y: 100 }], cancel: true })
+  await settle()
+  assert.equal(postThreshold.inputCalls.at(-1).action, 'touchUp', 'cancelling after touchDown must lift the finger')
+  assert.deepEqual(
+    { x: postThreshold.inputCalls.at(-1).x, y: postThreshold.inputCalls.at(-1).y },
+    { x: 60, y: 100 },
+  )
 })
 
-test('a swipe that ends where it began is treated as a tap', async () => {
-  // A finger that travels out and comes back names no displacement; asking the
-  // device to drag zero distance accomplishes nothing.
-  const { inputCalls, gesture } = await pictureWithInputs()
-  gesture({ x: 50, y: 100 }, { x: 50, y: 100 }, { moves: [{ x: 90, y: 180 }, { x: 50, y: 100 }] })
+test('a swipe that ends where it began becomes a tap in fallback mode and lifts cleanly in live mode', async () => {
+  const fallback = await pictureWithInputs({ liveTouch: false })
+  // Prime fallback detection.
+  fallback.gesture({ x: 10, y: 10 }, { x: 40, y: 10 })
   await settle()
-  assert.equal(inputCalls.length, 1)
-  assert.equal(inputCalls[0].action, 'click', 'a zero-distance swipe becomes a tap')
+  fallback.inputCalls.length = 0
+
+  fallback.gesture({ x: 50, y: 100 }, { x: 50, y: 100 }, { moves: [{ x: 90, y: 180 }, { x: 50, y: 100 }] })
+  await settle()
+  assert.equal(fallback.inputCalls.length, 1)
+  assert.equal(fallback.inputCalls[0].action, 'click', 'a zero-distance fallback swipe becomes a tap')
+
+  const live = await pictureWithInputs({ liveTouch: true })
+  live.gesture({ x: 50, y: 100 }, { x: 50, y: 100 }, { moves: [{ x: 90, y: 180 }, { x: 50, y: 100 }] })
+  await settle()
+  assert.equal(live.inputCalls.at(-1).action, 'touchUp', 'a live drag that returns to start must lift the finger')
 })
 
-test('the swipe being drawn appears while the finger is still down', async () => {
-  // The gesture is invisible until it is committed unless the panel draws it, and
-  // a swipe whose direction cannot be seen beforehand is hard to aim. The line
-  // must therefore exist *before* the release, and be gone after it.
-  const { picture, image, inputCalls, reRender } = await pictureWithInputs()
-  picture.props.onPointerDown({ button: 0, pointerId: 1, clientX: 10, clientY: 20, currentTarget: image })
-  picture.props.onPointerMove({ pointerId: 1, clientX: 60, clientY: 150, currentTarget: image })
+test('live drag hides the dashed line while streaming, and fallback mode still draws it until release', async () => {
+  // Live follow-finger mode: no dashed line overlay, immediate touchDown + touchMove while still pressed.
+  const live = await pictureWithInputs({ liveTouch: true })
+  live.picture.props.onPointerDown({ button: 0, pointerId: 1, clientX: 10, clientY: 20, currentTarget: live.image })
+  live.picture.props.onPointerMove({ pointerId: 1, clientX: 60, clientY: 150, currentTarget: live.image })
   await settle()
-  let tree = reRender().tree
+  let liveTree = live.reRender().tree
+  assert.equal(elementsOf(liveTree, 'hdci-drag-line').length, 0, 'live follow-finger drag must hide the dashed line')
+  assert.deepEqual(live.inputCalls, [
+    { device: 'phone-1', action: 'touchDown', x: 10, y: 20 },
+    { device: 'phone-1', action: 'touchMove', x: 60, y: 150 },
+  ])
+  live.picture.props.onPointerUp({ button: 0, pointerId: 1, clientX: 60, clientY: 150, currentTarget: live.image })
+  await settle()
+  assert.equal(live.inputCalls.at(-1).action, 'touchUp')
+
+  // Fallback mode: dashed line appears while finger is down and clears on release.
+  const fallback = await pictureWithInputs({ liveTouch: false })
+  fallback.gesture({ x: 10, y: 10 }, { x: 40, y: 10 })
+  await settle()
+  fallback.inputCalls.length = 0
+
+  fallback.picture.props.onPointerDown({ button: 0, pointerId: 2, clientX: 10, clientY: 20, currentTarget: fallback.image })
+  fallback.picture.props.onPointerMove({ pointerId: 2, clientX: 60, clientY: 150, currentTarget: fallback.image })
+  await settle()
+  let tree = fallback.reRender().tree
   const line = elementsOf(tree, 'hdci-drag-line')[0]
-  assert.ok(line !== undefined, 'a swipe in progress must be drawn')
+  assert.ok(line !== undefined, 'a fallback swipe in progress must be drawn')
   assert.equal(line.props.x1, 10)
   assert.equal(line.props.y1, 20)
-  // The end of the line is the *device* point converted back, not the raw pointer
-  // position: once the pointer leaves the picture the device coordinate is
-  // clamped to the edge, and the line has to stop where the swipe will stop. The
-  // half pixel is the centre of the pixel the pointer landed in.
   assert.equal(line.props.x2, 60.5)
   assert.equal(line.props.y2, 150.5)
-  assert.deepEqual(inputCalls, [], 'nothing is sent until the finger lifts')
+  assert.deepEqual(fallback.inputCalls, [], 'nothing is sent in fallback mode until the finger lifts')
 
-  picture.props.onPointerUp({ button: 0, pointerId: 1, clientX: 60, clientY: 150, currentTarget: image })
+  fallback.picture.props.onPointerUp({ button: 0, pointerId: 2, clientX: 60, clientY: 150, currentTarget: fallback.image })
   await settle()
-  tree = reRender().tree
+  tree = fallback.reRender().tree
   assert.equal(elementsOf(tree, 'hdci-drag-line').length, 0, 'the line goes away once the gesture ends')
-  assert.equal(inputCalls.length, 1, 'and the swipe is sent')
-  assert.equal(inputCalls[0].action, 'swipe')
+  assert.equal(fallback.inputCalls.length, 1, 'and the swipe is sent')
+  assert.equal(fallback.inputCalls[0].action, 'swipe')
+})
+
+test('rapid touchMove events coalesce to the latest point while an input is in flight', async () => {
+  const pending = []
+  const sent = []
+  const { pages, react } = loadClient(async (url, init = {}) => {
+    const pathname = String(url).split('?')[0]
+    if (pathname === '/hdc/devices') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
+    }
+    if (pathname === '/hdc/input') {
+      const body = JSON.parse(String(init.body ?? '{}'))
+      sent.push(body)
+      return new Promise((resolve) => {
+        pending.push(() => resolve({ ok: true, status: 200, clone() { return { json: async () => ({ device: 'phone-1', command: 'ok' }) } } }))
+      })
+    }
+    return { ok: true, status: 200, clone() { return { json: async () => ({}) } } }
+  })
+  const page = pages[0].component
+  react.render(page, { t: (key) => key })
+  await settle()
+  const { tree } = react.render(page, { t: (key) => key })
+  const picture = elementsOf(tree, 'hdci-shot')[0]
+  const bounds = { left: 0, top: 0, width: 100, height: 200 }
+  const image = {
+    naturalWidth: 100,
+    naturalHeight: 200,
+    getBoundingClientRect: () => bounds,
+    parentElement: { clientLeft: 0, clientTop: 0, getBoundingClientRect: () => bounds },
+  }
+
+  picture.props.onPointerDown({ button: 0, pointerId: 1, pointerType: 'touch', clientX: 10, clientY: 20, currentTarget: image })
+  // While touchDown is in flight, fire three move events rapidly.
+  picture.props.onPointerMove({ pointerId: 1, pointerType: 'touch', clientX: 30, clientY: 50, currentTarget: image })
+  picture.props.onPointerMove({ pointerId: 1, pointerType: 'touch', clientX: 40, clientY: 80, currentTarget: image })
+  picture.props.onPointerMove({ pointerId: 1, pointerType: 'touch', clientX: 50, clientY: 120, currentTarget: image })
+
+  // Drain each in-flight request one by one.
+  while (pending.length > 0) {
+    pending.shift()()
+    await settle()
+  }
+  assert.deepEqual(sent, [
+    { device: 'phone-1', action: 'touchDown', x: 10, y: 20 },
+    { device: 'phone-1', action: 'touchMove', x: 50, y: 120 },
+  ])
 })
 
 test('the picture declares every pointer handler a gesture needs', async () => {
@@ -981,11 +1109,11 @@ test('a press that travels out and comes back is a swipe, not a tap', () => {
   // near its start read as a tap, so the device got a click where the user meant
   // to scroll. The furthest the pointer got is what decides.
   return (async () => {
-    const { inputCalls, gesture } = await pictureWithInputs()
+    const { inputCalls, gesture } = await pictureWithInputs({ liveTouch: false })
     gesture({ x: 50, y: 100 }, { x: 52, y: 102 }, { moves: [{ x: 90, y: 180 }, { x: 52, y: 102 }] })
     await settle()
-    assert.equal(inputCalls.length, 1)
-    assert.equal(inputCalls[0].action, 'swipe', 'travelling past the threshold decides the gesture, even if it returns')
+    const swipes = inputCalls.filter((call) => call.action === 'swipe')
+    assert.equal(swipes.length, 1, 'travelling past the threshold decides the gesture, even if it returns')
   })()
 })
 
@@ -1001,7 +1129,7 @@ test('a mouse needs a longer slip than a fingertip before it counts as a drag', 
   const touch = await pictureWithInputs()
   touch.gesture({ x: 10, y: 10 }, { x: 22, y: 10 }, { pointerType: 'touch' })
   await settle()
-  assert.equal(touch.inputCalls[0].action, 'swipe', 'the same drag from a finger is a swipe')
+  assert.equal(touch.inputCalls[0].action, 'touchDown', 'the same drag from a finger enters drag mode')
 })
 
 test('a held press is sent as a long press, not a click', async () => {
@@ -1076,7 +1204,7 @@ test('a drag that leaves the picture says so, instead of a frozen readout', () =
   // The position is queued for the next frame rather than written on the spot, so
   // the assertion is about the payload reaching the drag state, not about which
   // state setter carries it.
-  assert.match(move, /queueDrag\(\{ from, to, start: gesture\.start, current, atEdge \}\)/u)
+  assert.match(move, /queueDrag\(\{ from, to, start: gesture\.start, current, atEdge, live: gesture\.live \}\)/u)
   const bar = source.slice(source.indexOf('function renderStageBar'), source.indexOf('function renderActions'))
   assert.match(bar, /drag\.atEdge \?/u, 'the status line must mention the edge')
   assert.match(bar, /t\('shot\.edgeReached'\)/u)
