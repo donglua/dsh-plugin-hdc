@@ -96,6 +96,14 @@ test('tryDaemonInput and tryOpenDaemonFrameStream talk to a forwarded uitest_soc
         } else if (msg.method === 'Captures' && msg.params.api === 'startCaptureScreen') {
           socket.write('{"result":true,"pts":3}\n')
           socket.write(JPEG)
+          // Burst two extra frames before the consumer reads the next one; only the latest should survive.
+          const newer = Buffer.concat([JPEG.subarray(0, JPEG.length - 2), Buffer.from([0x01, 0x02, 0xff, 0xd9])])
+          setTimeout(() => {
+            if (!socket.destroyed) {
+              socket.write(JPEG)
+              socket.write(newer)
+            }
+          }, 15)
         }
       }
     })
@@ -154,6 +162,10 @@ test('tryDaemonInput and tryOpenDaemonFrameStream talk to a forwarded uitest_soc
     const frame = await it.next()
     assert.equal(frame.done, false)
     assert.equal(frame.value.mediaType, 'image/jpeg')
+    await new Promise((r) => setTimeout(r, 40))
+    const latest = await it.next()
+    assert.equal(latest.done, false)
+    assert.equal(latest.value.data.byteLength, JPEG.byteLength + 2, 'stale intermediate frame must be dropped in favor of the latest frame')
     stream.stop()
   } finally {
     resetDaemonSessions()
