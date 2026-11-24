@@ -858,3 +858,54 @@ test('half a capture size is a 400 instead of a silent full-resolution capture',
   })
   assert.equal(ok.statusCode, 200)
 })
+
+test('the stream exposes stream mode, scale, and physical device dimensions in headers', async () => {
+  const png2x3 = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x02, 0x60, 0x00, 0x00, 0x05, 0x40,
+  ])
+  const withDisplaySize = createHandler({
+    services: services({
+      async openStream() {
+        return {
+          device: 'dev-1',
+          stream: {
+            ...frameStream([png2x3]),
+            mode: 'daemon',
+            scale: 0.5,
+            displaySize: { width: 1216, height: 2688 },
+          },
+        }
+      },
+    }),
+  })
+  const res1 = await call(withDisplaySize, '/hdc/stream?device=dev-1')
+  assert.equal(res1.statusCode, 200)
+  assert.equal(res1.getHeader('x-hdc-stream-mode'), 'daemon')
+  assert.equal(res1.getHeader('x-hdc-stream-scale'), '0.5')
+  assert.equal(res1.getHeader('x-hdc-device-width'), '1216')
+  assert.equal(res1.getHeader('x-hdc-device-height'), '2688')
+
+  // Without explicit displaySize, dimensions are derived from first frame / scale.
+  const derived = createHandler({
+    services: services({
+      async openStream() {
+        return {
+          device: 'dev-2',
+          stream: {
+            ...frameStream([png2x3]),
+            mode: 'fallback',
+            scale: 0.5,
+          },
+        }
+      },
+    }),
+  })
+  const res2 = await call(derived, '/hdc/stream?device=dev-2')
+  assert.equal(res2.statusCode, 200)
+  assert.equal(res2.getHeader('x-hdc-stream-mode'), 'fallback')
+  assert.equal(res2.getHeader('x-hdc-stream-scale'), '0.5')
+  assert.equal(res2.getHeader('x-hdc-device-width'), '1216')
+  assert.equal(res2.getHeader('x-hdc-device-height'), '2688')
+})

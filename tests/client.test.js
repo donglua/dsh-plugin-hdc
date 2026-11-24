@@ -159,7 +159,7 @@ function createReact() {
  * runs the factory and then `apply` against a context that records what was
  * registered, so the component can be rendered without a browser.
  */
-function loadClient(fetchImpl) {
+function loadClient(fetchImpl, extraGlobals = {}) {
   const source = readFileSync(clientPath, 'utf8')
   const registered = { panels: [], pages: [] }
   const react = createReact()
@@ -210,6 +210,7 @@ function loadClient(fetchImpl) {
     Date: SandboxDate,
     fetch: fetchImpl,
     document: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} },
+    ...extraGlobals,
   }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
   return { ...registered, react, clock }
@@ -1370,4 +1371,141 @@ test('the stage exposes pressing and dragging state attributes across pointer ge
   stage = stageOf(reRender().tree)
   assert.equal(stage.props['data-pressing'], undefined, 'pointercancel clears pressing state')
   assert.equal(stage.props['data-longpress'], undefined, 'pointercancel clears longpress state')
+})
+
+test('when ReadableStream and createImageBitmap exist, the panel streams frames onto a canvas immediately and maps scaled taps to physical pixels', async () => {
+  const inputCalls = []
+  let streamController
+  let streamAborted = false
+  const drawnBitmaps = []
+  const decodedBlobs = []
+  let pendingBitmapResolve = null
+
+  const fakeCanvas = {
+    width: 0,
+    height: 0,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 304, height: 672 }),
+    parentElement: { clientLeft: 0, clientTop: 0, getBoundingClientRect: () => ({ left: 0, top: 0, width: 304, height: 672 }) },
+    getContext: () => ({
+      drawImage(bitmap) {
+        drawnBitmaps.push({ width: bitmap.width, height: bitmap.height, closed: bitmap.closed })
+      },
+    }),
+  }
+
+  class FakeBlob {
+    constructor(parts, opts) {
+      this.bytes = Buffer.concat(parts.map((p) => Buffer.from(p)))
+      this.type = opts?.type ?? ''
+    }
+  }
+
+  const fakeHeaders = new Map([
+    ['content-type', 'multipart/x-mixed-replace; boundary=dsh-hdc-frame'],
+    ['x-hdc-stream-mode', 'daemon'],
+    ['x-hdc-stream-scale', '0.5'],
+    ['x-hdc-device-width', '1216'],
+    ['x-hdc-device-height', '2688'],
+  ])
+
+  const { pages, react } = loadClient(
+    async (url, init = {}) => {
+      const pathname = String(url).split('?')[0]
+      if (pathname === '/hdc/devices') {
+        return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
+      }
+      if (pathname === '/hdc/stream') {
+        init.signal?.addEventListener('abort', () => { streamAborted = true }, { once: true })
+        const body = new ReadableStream({
+          start(controller) { streamController = controller },
+        })
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: (k) => fakeHeaders.get(String(k).toLowerCase()) ?? null },
+          body,
+        }
+      }
+      if (pathname === '/hdc/input') {
+        inputCalls.push(JSON.parse(String(init.body ?? '{}')))
+        return { ok: true, status: 200, clone() { return { json: async () => ({ device: 'phone-1', command: 'ok' }) } } }
+      }
+      return { ok: true, status: 200, clone() { return { json: async () => ({}) } } }
+    },
+    {
+      Blob: FakeBlob,
+      ReadableStream,
+      createImageBitmap: async (blob) => {
+        decodedBlobs.push(blob)
+        // Hold the second decode open so two arriving frames coalesce to the newest.
+        if (decodedBlobs.length === 2) {
+          await new Promise((resolve) => { pendingBitmapResolve = resolve })
+        }
+        const isLandscape = blob.bytes.includes(0xaa)
+        const bitmap = {
+          width: isLandscape ? 1344 : 608,
+          height: isLandscape ? 608 : 1344,
+          closed: false,
+          close() { this.closed = true },
+        }
+        return bitmap
+      },
+    },
+  )
+
+  const formatT = (key, params) => (params === undefined ? key : `${key} ${JSON.stringify(params)}`)
+  const page = pages[0].component
+  react.render(page, { t: formatT })
+  await settle()
+  let { tree } = react.render(page, { t: formatT })
+  let canvas = elementsOf(tree, 'hdci-shot')[0]
+  assert.equal(canvas.type, 'canvas', 'streaming mode renders a canvas element')
+  // Bind ref the way React does during commit.
+  canvas.props.ref.current = fakeCanvas
+
+  // Enqueue frame 1 split across two chunks, WITHOUT any trailing boundary after it.
+  const frame1 = Buffer.from([0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9])
+  const part1 = Buffer.concat([
+    Buffer.from('--dsh-hdc-frame\r\ncontent-type: image/jpeg\r\ncontent-length: 6\r\n\r\n'),
+    frame1.subarray(0, 3),
+  ])
+  streamController.enqueue(new Uint8Array(part1))
+  await settle()
+  assert.equal(drawnBitmaps.length, 0, 'incomplete payload does not decode yet')
+  streamController.enqueue(new Uint8Array(Buffer.concat([frame1.subarray(3), Buffer.from('\r\n')])))
+  await settle()
+  assert.equal(drawnBitmaps.length, 1, 'frame 1 renders immediately on content-length completion without waiting for next boundary')
+  assert.equal(fakeCanvas.width, 608)
+  assert.equal(fakeCanvas.height, 1344)
+
+  ;({ tree } = react.render(page, { t: formatT }))
+  assert.match(textOf(tree).join(' '), /shot\.size \{"width":1216,"height":2688\}/u, 'stage bar shows full physical device size')
+
+  // Tap center of the 304x672 canvas -> must map to physical 1216x2688 center (608, 1344), not 608x1344 center!
+  canvas = elementsOf(tree, 'hdci-shot')[0]
+  canvas.props.onPointerDown({ button: 0, pointerId: 1, clientX: 152, clientY: 336, currentTarget: fakeCanvas })
+  canvas.props.onPointerUp({ button: 0, pointerId: 1, clientX: 152, clientY: 336, currentTarget: fakeCanvas })
+  await settle()
+  assert.deepEqual(inputCalls[0], { device: 'phone-1', action: 'click', x: 608, y: 1344 })
+
+  // Burst frame 2 (stalled in decode), frame 3 (stale), and frame 4 (landscape 0xaa): frame 3 must be dropped.
+  const makePart = (bytes) => Buffer.concat([
+    Buffer.from(`--dsh-hdc-frame\r\ncontent-type: image/jpeg\r\ncontent-length: ${bytes.length}\r\n\r\n`),
+    bytes,
+    Buffer.from('\r\n'),
+  ])
+  streamController.enqueue(new Uint8Array(makePart(Buffer.from([0xff, 0xd8, 0x11, 0xff, 0xd9]))))
+  await settle()
+  streamController.enqueue(new Uint8Array(makePart(Buffer.from([0xff, 0xd8, 0x22, 0xff, 0xd9]))))
+  streamController.enqueue(new Uint8Array(makePart(Buffer.from([0xff, 0xd8, 0xaa, 0xff, 0xd9]))))
+  await settle()
+  pendingBitmapResolve()
+  await settle()
+  assert.equal(decodedBlobs.length, 3, 'intermediate frame 3 must be coalesced away while decode is busy')
+  assert.equal(fakeCanvas.width, 1344)
+  assert.equal(fakeCanvas.height, 608)
+
+  // Unmounting aborts the live fetch stream cleanly.
+  react.unmount()
+  assert.equal(streamAborted, true)
 })

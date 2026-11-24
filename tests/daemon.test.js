@@ -527,3 +527,72 @@ test('tryOpenDaemonFrameStream fails fast when daemon returns a non-recoverable 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('tryOpenDaemonFrameStream defaults to scale 0.5, reads Driver.getDisplaySize, and handles JSON without newline', async () => {
+  resetDaemonSessions()
+  let seenScale
+  const server = net.createServer((socket) => {
+    socket.on('error', () => {})
+    let buf = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk])
+      const head = Buffer.from('_uitestkit_rpc_message_head_')
+      const tail = Buffer.from('_uitestkit_rpc_message_tail_')
+      for (;;) {
+        const hi = buf.indexOf(head)
+        if (hi < 0) break
+        const ti = buf.indexOf(tail, hi + head.length + 8)
+        if (ti < 0) break
+        const len = buf.readUInt32BE(hi + head.length + 4)
+        const msg = JSON.parse(buf.subarray(hi + head.length + 8, hi + head.length + 8 + len).toString('utf8'))
+        buf = buf.subarray(ti + tail.length)
+        if (msg.method === 'callHypiumApi' && msg.params.api === 'Driver.create') {
+          socket.write('{"result":"Driver#0","pts":1}\n')
+        } else if (msg.method === 'callHypiumApi' && msg.params.api === 'Driver.getDisplaySize') {
+          socket.write('{"result":{"displayId":0,"x":1216,"y":2688},"pts":2}\n')
+        } else if (msg.method === 'Captures' && msg.params.api === 'startCaptureScreen') {
+          seenScale = msg.params.args?.options?.scale
+          // Emit JSON without trailing newline before JPEG arrives.
+          socket.write('{"result":true,"pts":3}')
+          setTimeout(() => {
+            if (!socket.destroyed) socket.write(JPEG)
+          }, 10)
+        } else if (msg.method === 'Captures' && msg.params.api === 'stopCaptureScreen') {
+          socket.write('{"result":true,"pts":4}\n')
+        }
+      }
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-daemon-scale-'))
+  const fakeHdc = path.join(dir, 'hdc')
+  await writeFile(fakeHdc, [
+    '#!/bin/sh',
+    'shift 2 2>/dev/null || true',
+    'if [ "$1" = "fport" ] && [ "$2" = "ls" ]; then',
+    `  echo "FakeSer tcp:${port} localabstract:uitest_socket [Forward]"`,
+    '  exit 0',
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'))
+  await chmod(fakeHdc, 0o755)
+
+  try {
+    const stream = await tryOpenDaemonFrameStream(fakeHdc, 'FakeSer', {})
+    assert.ok(stream !== undefined)
+    assert.equal(seenScale, 0.5)
+    assert.equal(stream.mode, 'daemon')
+    assert.equal(stream.scale, 0.5)
+    assert.deepEqual(stream.displaySize, { width: 1216, height: 2688 })
+    const it = stream.frames[Symbol.asyncIterator]()
+    const first = await it.next()
+    assert.equal(first.done, false)
+    stream.stop()
+  } finally {
+    resetDaemonSessions()
+    await new Promise((resolve) => server.close(resolve))
+    await rm(dir, { recursive: true, force: true })
+  }
+})
