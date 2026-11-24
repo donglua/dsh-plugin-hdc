@@ -574,6 +574,51 @@ test('a UI tree that arrives after a device switch is never rendered tappable', 
   assert.equal(textOf(tree).join(' ').includes('Button "Old"'), false, 'the old device text must not be shown')
 })
 
+test('input queued immediately after a device switch drains when the old worker exits', async () => {
+  const inputCalls = []
+  const { pages, react } = loadClient(async (url, init = {}) => {
+    const pathname = String(url).split('?')[0]
+    if (pathname === '/hdc/devices') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-a', 'phone-b'] }) } } }
+    }
+    if (pathname === '/hdc/input') {
+      const body = JSON.parse(String(init.body ?? '{}'))
+      inputCalls.push(body)
+      if (body.device === 'phone-a') {
+        // Keep A's worker in flight until the device switch aborts it. The
+        // rejection queues the old worker's continuation as a microtask, so the
+        // click on B below happens while queue.running is still true.
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+        })
+      }
+      return { ok: true, status: 200, clone() { return { json: async () => ({ device: body.device, command: 'ok' }) } } }
+    }
+    return { ok: true, status: 200, clone() { return { json: async () => ({}) } } }
+  })
+  const page = pages[0].component
+  react.render(page, { t: (key) => key })
+  await settle()
+  let { tree } = react.render(page, { t: (key) => key })
+
+  const back = elementsOf(tree, 'hdci-btn').find((node) => node.props.title === 'action.back')
+  back.props.onClick()
+  assert.deepEqual(inputCalls, [{ device: 'phone-a', action: 'key', key: 'Back' }])
+
+  elementsOf(tree, 'hdci-select')[0].props.onChange({ target: { value: 'phone-b' } })
+  ;({ tree } = react.render(page, { t: (key) => key }))
+  const home = elementsOf(tree, 'hdci-btn').find((node) => node.props.title === 'action.home')
+  home.props.onClick()
+  await settle()
+
+  assert.deepEqual(inputCalls, [
+    { device: 'phone-a', action: 'key', key: 'Back' },
+    { device: 'phone-b', action: 'key', key: 'Home' },
+  ], 'the old worker must hand the queue to the new generation before exiting')
+  ;({ tree } = react.render(page, { t: (key) => key }))
+  assert.equal(textOf(tree).join(' ').includes('action.busy'), false, 'the drained queue must not stay busy')
+})
+
 // ── the UI tree is a tree ──────────────────────────────────────────────────
 // The Host answers both views of one dump, and the panel draws the outline: the
 // point of the card is the hierarchy, which a flat list of identical rows cannot
