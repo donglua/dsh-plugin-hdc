@@ -70,6 +70,7 @@ test('tryDaemonInput and tryOpenDaemonFrameStream talk to a forwarded uitest_soc
   resetDaemonSessions()
   const receivedCalls = []
   const server = net.createServer((socket) => {
+    socket.on('error', () => {})
     let buf = Buffer.alloc(0)
     socket.on('data', (chunk) => {
       buf = Buffer.concat([buf, chunk])
@@ -241,6 +242,7 @@ test('live touch skips hdc list targets once an active daemon session exists', a
   resetDaemonSessions()
   invalidateTargets()
   const server = net.createServer((socket) => {
+    socket.on('error', () => {})
     let buf = Buffer.alloc(0)
     socket.on('data', (chunk) => {
       buf = Buffer.concat([buf, chunk])
@@ -314,6 +316,213 @@ test('live touch skips hdc list targets once an active daemon session exists', a
   } finally {
     resetDaemonSessions()
     invalidateTargets()
+    await new Promise((resolve) => server.close(resolve))
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('tryOpenDaemonFrameStream recovers from stale copyScreen and flushes stopCaptureScreen', async () => {
+  resetDaemonSessions()
+  const receivedApis = []
+  let activeCapture = true
+  let streamSocket
+  const server = net.createServer((socket) => {
+    socket.on('error', () => {})
+    let buf = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk])
+      const head = Buffer.from('_uitestkit_rpc_message_head_')
+      const tail = Buffer.from('_uitestkit_rpc_message_tail_')
+      for (;;) {
+        const hi = buf.indexOf(head)
+        if (hi < 0) break
+        const ti = buf.indexOf(tail, hi + head.length + 8)
+        if (ti < 0) break
+        const len = buf.readUInt32BE(hi + head.length + 4)
+        const msg = JSON.parse(buf.subarray(hi + head.length + 8, hi + head.length + 8 + len).toString('utf8'))
+        buf = buf.subarray(ti + tail.length)
+        if (msg.method === 'callHypiumApi' && msg.params.api === 'Driver.create') {
+          socket.write('{"result":"Driver#0","pts":1}\n')
+        } else if (msg.method === 'Captures') {
+          receivedApis.push(msg.params.api)
+          if (msg.params.api === 'startCaptureScreen') {
+            if (activeCapture) {
+              socket.write('{"result":null,"exception":"Capture already running: copyScreen"}\n')
+            } else {
+              activeCapture = true
+              streamSocket = socket
+              socket.write('{"result":null,"exception":""}\n')
+              socket.write('{"result":true,"pts":10}\n')
+              socket.write(JPEG)
+            }
+          } else if (msg.params.api === 'stopCaptureScreen') {
+            activeCapture = false
+            socket.write('{"result":true,"pts":11}\n')
+          }
+        }
+      }
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-daemon-recover-'))
+  const fakeHdc = path.join(dir, 'hdc')
+  await writeFile(fakeHdc, [
+    '#!/bin/sh',
+    'shift 2 2>/dev/null || true',
+    'if [ "$1" = "fport" ] && [ "$2" = "ls" ]; then',
+    `  echo "FakeSer tcp:${port} localabstract:uitest_socket [Forward]"`,
+    '  exit 0',
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'))
+  await chmod(fakeHdc, 0o755)
+
+  try {
+    const stream = await tryOpenDaemonFrameStream(fakeHdc, 'FakeSer', {})
+    assert.ok(stream !== undefined, 'stream must open after recovering stale copyScreen')
+    const it = stream.frames[Symbol.asyncIterator]()
+    const initial = await it.next()
+    assert.equal(initial.done, false)
+    assert.deepEqual([...initial.value.data], [...JPEG])
+
+    // Subsequent live update from daemon arrives over the same open stream.
+    const updated = Buffer.concat([JPEG.subarray(0, JPEG.length - 2), Buffer.from([0x05, 0x06, 0xff, 0xd9])])
+    streamSocket.write(updated)
+    const next = await it.next()
+    assert.equal(next.done, false)
+    assert.deepEqual([...next.value.data], [...updated])
+
+    stream.stop()
+    await new Promise((r) => setTimeout(r, 40))
+    assert.deepEqual(
+      receivedApis,
+      ['startCaptureScreen', 'stopCaptureScreen', 'startCaptureScreen', 'stopCaptureScreen'],
+      'stop() must flush stopCaptureScreen before destroying the socket',
+    )
+    assert.equal(activeCapture, false)
+  } finally {
+    resetDaemonSessions()
+    await new Promise((resolve) => server.close(resolve))
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('tryOpenDaemonFrameStream falls back and enters capture cooldown when daemon acks without emitting JPEGs', async () => {
+  resetDaemonSessions()
+  let captureAttempts = 0
+  const server = net.createServer((socket) => {
+    socket.on('error', () => {})
+    let buf = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk])
+      const head = Buffer.from('_uitestkit_rpc_message_head_')
+      const tail = Buffer.from('_uitestkit_rpc_message_tail_')
+      for (;;) {
+        const hi = buf.indexOf(head)
+        if (hi < 0) break
+        const ti = buf.indexOf(tail, hi + head.length + 8)
+        if (ti < 0) break
+        const len = buf.readUInt32BE(hi + head.length + 4)
+        const msg = JSON.parse(buf.subarray(hi + head.length + 8, hi + head.length + 8 + len).toString('utf8'))
+        buf = buf.subarray(ti + tail.length)
+        if (msg.method === 'callHypiumApi') {
+          socket.write('{"result":"Driver#0","pts":1}\n')
+        } else if (msg.method === 'Captures' && msg.params.api === 'startCaptureScreen') {
+          captureAttempts += 1
+          socket.write('{"result":null,"exception":""}\n')
+          socket.write('{"result":true,"pts":3}\n')
+          // Emit no JPEG frames (HarmonyOS 7.0 behavior where copyScreen produces no output).
+        } else if (msg.method === 'Captures' && msg.params.api === 'stopCaptureScreen') {
+          socket.write('{"result":true,"pts":4}\n')
+        }
+      }
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-daemon-silent-'))
+  const fakeHdc = path.join(dir, 'hdc')
+  await writeFile(fakeHdc, [
+    '#!/bin/sh',
+    'shift 2 2>/dev/null || true',
+    'if [ "$1" = "fport" ] && [ "$2" = "ls" ]; then',
+    `  echo "FakeSer tcp:${port} localabstract:uitest_socket [Forward]"`,
+    '  exit 0',
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'))
+  await chmod(fakeHdc, 0o755)
+
+  try {
+    const first = await tryOpenDaemonFrameStream(fakeHdc, 'FakeSer', { firstFrameTimeoutMs: 40 })
+    assert.equal(first, undefined, 'must return undefined so caller falls back to openFrameStream')
+    assert.equal(captureAttempts, 1)
+
+    // Subsequent openStream skips daemon capture immediately during cooldown while input still works.
+    const t0 = Date.now()
+    const second = await tryOpenDaemonFrameStream(fakeHdc, 'FakeSer', { firstFrameTimeoutMs: 500 })
+    assert.equal(second, undefined)
+    assert.ok(Date.now() - t0 < 50, 'cooldown must skip retrying silent daemon capture')
+    assert.equal(captureAttempts, 1)
+  } finally {
+    resetDaemonSessions()
+    await new Promise((resolve) => server.close(resolve))
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('tryOpenDaemonFrameStream fails fast when daemon returns a non-recoverable error', async () => {
+  resetDaemonSessions()
+  const server = net.createServer((socket) => {
+    socket.on('error', () => {})
+    let buf = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk])
+      const head = Buffer.from('_uitestkit_rpc_message_head_')
+      const tail = Buffer.from('_uitestkit_rpc_message_tail_')
+      for (;;) {
+        const hi = buf.indexOf(head)
+        if (hi < 0) break
+        const ti = buf.indexOf(tail, hi + head.length + 8)
+        if (ti < 0) break
+        const len = buf.readUInt32BE(hi + head.length + 4)
+        const msg = JSON.parse(buf.subarray(hi + head.length + 8, hi + head.length + 8 + len).toString('utf8'))
+        buf = buf.subarray(ti + tail.length)
+        if (msg.method === 'callHypiumApi') {
+          socket.write('{"result":"Driver#0","pts":1}\n')
+        } else if (msg.method === 'Captures') {
+          socket.write('{"result":null,"exception":"unsupported Captures method"}\n')
+        }
+      }
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-daemon-err-'))
+  const fakeHdc = path.join(dir, 'hdc')
+  await writeFile(fakeHdc, [
+    '#!/bin/sh',
+    'shift 2 2>/dev/null || true',
+    'if [ "$1" = "fport" ] && [ "$2" = "ls" ]; then',
+    `  echo "FakeSer tcp:${port} localabstract:uitest_socket [Forward]"`,
+    '  exit 0',
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'))
+  await chmod(fakeHdc, 0o755)
+
+  try {
+    const t0 = Date.now()
+    const stream = await tryOpenDaemonFrameStream(fakeHdc, 'FakeSer', { startupTimeoutMs: 2500 })
+    assert.equal(stream, undefined)
+    assert.ok(Date.now() - t0 < 1000, 'must fail fast without waiting for startupTimeoutMs')
+  } finally {
+    resetDaemonSessions()
     await new Promise((resolve) => server.close(resolve))
     await rm(dir, { recursive: true, force: true })
   }

@@ -499,6 +499,53 @@ test('the stream answers MJPEG parts, each with its own length', async () => {
   assert.match(body, /content-length: 4\r\n\r\n\u00ff\u00d8\u00ff\u0003/u)
 })
 
+test('a stream under backpressure writes the entire frame and trailing newline before pausing', async () => {
+  let firstSent = false
+  let resolveSecond
+  const releaseSecond = new Promise((r) => { resolveSecond = r })
+  const frameOne = Buffer.from([0xff, 0xd8, 0xff, 0xaa, 0xbb])
+  const stream = {
+    stderr: '',
+    frames: {
+      [Symbol.asyncIterator]() { return this },
+      async next() {
+        if (!firstSent) {
+          firstSent = true
+          return { done: false, value: { data: frameOne, mediaType: 'image/jpeg' } }
+        }
+        await releaseSecond
+        return { done: true, value: undefined }
+      },
+    },
+    stop() {},
+  }
+
+  const handler = createHandler({ services: services({ async openStream() { return { device: 'dev-1', stream } } }) })
+  const req = fakeRequest('/hdc/stream')
+  const res = fakeResponse()
+  res.writableLength = 0
+  // Every write returns false (simulating frame > socket highWaterMark);
+  // nothing may be short-circuited or withheld waiting for the next frame.
+  res.write = function write(chunk) {
+    this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+    this.headersSent = true
+    return false
+  }
+  const pending = handler(req, res)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  const flushed = Buffer.concat(res.chunks).toString('latin1')
+  assert.equal(
+    flushed,
+    '--dsh-hdc-frame\r\ncontent-type: image/jpeg\r\ncontent-length: 5\r\n\r\n\u00ff\u00d8\u00ff\u00aa\u00bb\r\n',
+    'the frame payload and trailing CRLF must both be flushed immediately even when res.write returns false',
+  )
+
+  res.events.emit('drain')
+  resolveSecond()
+  await pending
+})
+
 test('the stream reports a device that produces nothing as a real status', async () => {
   // Once a 200 with a streaming type has gone out there is no way to report a
   // failure, so a stream that cannot start must be refused first.

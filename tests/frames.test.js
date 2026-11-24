@@ -589,3 +589,38 @@ test('a recording that fails on the filesystem leaves no temp frames behind', as
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a live openFrameStream eagerly drains stdout and drops stale intermediate frames', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-hdc-latest-live-'))
+  try {
+    const older = JPEG
+    const newer = Buffer.concat([JPEG.subarray(0, JPEG.length - 2), Buffer.from([0x07, 0x08, 0xff, 0xd9])])
+    const combined = Buffer.concat([
+      Buffer.from(`FRAME ${older.length}\n`),
+      older,
+      Buffer.from(`FRAME ${older.length}\n`),
+      older,
+      Buffer.from(`FRAME ${newer.length}\n`),
+      newer,
+    ])
+    const burstHdc = path.join(dir, 'burst.sh')
+    await writeFile(burstHdc, [
+      '#!/bin/sh',
+      `printf '%s' '${combined.toString('base64')}' | base64 -d`,
+      'sleep 1',
+      '',
+    ].join('\n'))
+    chmodSync(burstHdc, 0o755)
+
+    // No maxFrames => live stream mode: drains stdout in background and coalesces bursts to the latest frame.
+    const stream = openFrameStream(burstHdc, 'FakePhone123', {})
+    const it = stream.frames[Symbol.asyncIterator]()
+    const step = await it.next()
+    assert.equal(step.done, false)
+    assert.equal(step.value.data.byteLength, newer.byteLength, 'must deliver the newest frame and drop stale queued frames')
+    stream.stop()
+    await stream.done
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
