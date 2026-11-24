@@ -1304,3 +1304,70 @@ test('a drag that leaves the picture says so, instead of a frozen readout', () =
   assert.match(bar, /drag\.atEdge \?/u, 'the status line must mention the edge')
   assert.match(bar, /t\('shot\.edgeReached'\)/u)
 })
+
+test('every mouse state on the picture uses a centered touch-ring cursor without jumping to grabbing', async () => {
+  const { pages, react } = loadClient(fetchWith({
+    '/hdc/devices': async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }),
+  }))
+  const page = pages[0].component
+  react.render(page, { t: (key) => key })
+  await settle()
+  const { tree } = react.render(page, { t: (key) => key })
+  const styleNode = tree.children.find((node) => node?.type === 'style')
+  assert.ok(styleNode !== undefined, 'the rendered tree includes the stylesheet')
+  const renderedCss = String(styleNode.children[0] ?? '')
+
+  const idleRule = renderedCss.split('\n').find((line) => /^\.hdci-shot\{/u.test(line))
+  const pressRule = renderedCss.split('\n').find((line) => /^\.hdci-shot:active,\.hdci-stage\[data-pressing='true'\] \.hdci-shot\{/u.test(line))
+  const longPressRule = renderedCss.split('\n').find((line) => /^\.hdci-stage\[data-longpress='true'\] \.hdci-shot\{/u.test(line))
+  const dragRule = renderedCss.split('\n').find((line) => /^\.hdci-stage\[data-dragging='true'\] \.hdci-shot\{/u.test(line))
+
+  for (const [name, rule] of [
+    ['idle', idleRule],
+    ['press', pressRule],
+    ['longpress', longPressRule],
+    ['drag', dragRule],
+  ]) {
+    assert.ok(rule !== undefined, `${name} cursor rule must exist`)
+    assert.match(
+      rule,
+      /cursor:url\("data:image\/svg\+xml,%3Csvg xmlns='http:\/\/www\.w3\.org\/2000\/svg' width='24' height='24' viewBox='0 0 24 24'%3E[\s\S]+%3C\/svg%3E"\) 12 12, /u,
+      `${name} cursor must use a 24x24 SVG centered at 12 12`,
+    )
+  }
+  assert.equal(/cursor:grabbing\b/u.test(dragRule), false, 'drag state must use the touch-ring cursor rather than system grabbing')
+})
+
+test('the stage exposes pressing and dragging state attributes across pointer gestures', async () => {
+  const { picture, image, reRender } = await pictureWithInputs({ liveTouch: true })
+  const stageOf = (tree) => elementsOf(tree, 'hdci-stage')[0]
+
+  assert.equal(stageOf(reRender().tree).props['data-pressing'], undefined)
+  assert.equal(stageOf(reRender().tree).props['data-dragging'], undefined)
+
+  picture.props.onPointerDown({ button: 0, pointerId: 1, pointerType: 'mouse', clientX: 40, clientY: 80, currentTarget: image })
+  await settle()
+  let stage = stageOf(reRender().tree)
+  assert.equal(stage.props['data-pressing'], 'true', 'pointerdown marks the stage as pressing immediately')
+  assert.equal(stage.props['data-dragging'], undefined)
+
+  picture.props.onPointerMove({ pointerId: 1, pointerType: 'mouse', clientX: 90, clientY: 80, currentTarget: image })
+  await settle()
+  stage = stageOf(reRender().tree)
+  assert.equal(stage.props['data-dragging'], 'true', 'moving past threshold marks the stage as dragging')
+
+  picture.props.onPointerUp({ button: 0, pointerId: 1, pointerType: 'mouse', clientX: 90, clientY: 80, currentTarget: image })
+  await settle()
+  stage = stageOf(reRender().tree)
+  assert.equal(stage.props['data-pressing'], undefined, 'pointerup clears pressing state')
+  assert.equal(stage.props['data-dragging'], undefined, 'pointerup clears dragging state')
+
+  picture.props.onPointerDown({ button: 0, pointerId: 2, pointerType: 'mouse', clientX: 40, clientY: 80, currentTarget: image })
+  await settle()
+  assert.equal(stageOf(reRender().tree).props['data-pressing'], 'true')
+  picture.props.onPointerCancel({ pointerId: 2 })
+  await settle()
+  stage = stageOf(reRender().tree)
+  assert.equal(stage.props['data-pressing'], undefined, 'pointercancel clears pressing state')
+  assert.equal(stage.props['data-longpress'], undefined, 'pointercancel clears longpress state')
+})
