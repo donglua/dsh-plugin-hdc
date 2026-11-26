@@ -163,6 +163,8 @@ function loadClient(fetchImpl, extraGlobals = {}) {
   const source = readFileSync(clientPath, 'utf8')
   const registered = { panels: [], pages: [] }
   const react = createReact()
+  /** Services the panel looks up on the client context, by name. */
+  const services = extraGlobals.services ?? {}
   const loader = {
     load(entry) {
       const exported = entry.factory((name) => {
@@ -175,6 +177,9 @@ function loadClient(fetchImpl, extraGlobals = {}) {
           register: () => () => {},
           bind: () => (key, params) => (params === undefined ? key : `${key} ${JSON.stringify(params)}`),
         },
+        // The panel reads `fileActions` from here for clipboard writes and
+        // native saves, the same way the official bundles do.
+        get: (name) => services[name],
         slots: {
           inject: (_name, fn) => fn(),
           register: (options, component) => {
@@ -1299,10 +1304,10 @@ test('a quick press is still a click, so the long press does not swallow taps', 
   assert.equal(inputCalls[0].action, 'click')
 })
 
-test('a frame-sequence recording offers its path, not a JSON download', async () => {
-  // The artifact route answers a directory with a JSON listing, so an
-  // "open the recording" link for a sequence hands the user a document instead
-  // of a video. The frames are still kept; only the misleading link goes away.
+test('a frame-sequence recording reports its path and offers no save action', async () => {
+  // The artifact route answers a directory with a JSON listing, so a save action
+  // for a sequence would hand the user a document instead of a video. The frames
+  // are still kept; only the misleading action goes away.
   const { pages, react } = loadClient(fetchWith({
     '/hdc/devices': async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }),
     '/hdc/record': async () => ({
@@ -1330,9 +1335,208 @@ test('a frame-sequence recording offers its path, not a JSON download', async ()
   ;({ tree } = react.render(page, { t: (key) => key }))
 
   assert.equal(startButton !== undefined, true)
-  const links = elementsOf(tree, 'hdci-link')
-  assert.equal(links.length, 0, 'a frame sequence must not offer a download link')
+  const artifacts = elementsOf(tree, 'hdci-artifact')
+  assert.equal(artifacts.length, 1, 'the sequence still gets a row')
+  const actionButtons = artifacts[0].children.flat(Infinity)
+    .filter((child) => child?.props?.title === 'shot.save' || child?.props?.title === 'shot.copyAgain')
+  assert.equal(actionButtons.length, 0, 'a frame sequence must not offer a save or copy action')
   assert.match(textOf(tree).join(' '), /shot\.recordFrames/u, 'the path is still reported')
+})
+
+test('a capture is copied to the clipboard, not written to the Host directory', async () => {
+  // The 截图 button used to hand back a download link, which cannot work in the
+  // Desktop shell: a download bypasses the request hook the shell authenticates
+  // with, so the Host answers it 403. The button copies instead, through the
+  // application's own file actions.
+  const copied = []
+  /** The objects the clipboard service was handed, before it reads them. */
+  const handed = []
+  const { pages, react } = loadClient(async (url) => {
+      const pathname = String(url).split('?')[0]
+      if (pathname === '/hdc/devices') {
+        return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
+      }
+      if (pathname === '/hdc/capture') {
+        return {
+          ok: true,
+          status: 200,
+          clone() {
+            return {
+              json: async () => ({
+                device: 'phone-1',
+                artifactId: 'shot-1',
+                name: 'hdc-shot-1.jpg',
+                mediaType: 'image/jpeg',
+                bytes: 9,
+              }),
+            }
+          },
+        }
+      }
+      if (pathname === '/hdc/artifact/shot-1') {
+        return { ok: true, status: 200, blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/jpeg' }) }
+      }
+      throw new Error(`unexpected ${pathname}`)
+  }, {
+    services: {
+      fileActions: {
+        canSaveAs: true,
+        async copyImage(source) {
+          handed.push(source)
+          const blob = await source.read(new AbortController().signal)
+          copied.push({ bytes: blob.size, mediaType: source.mediaType, name: source.name })
+        },
+        async save() { throw new Error('not used here') },
+      },
+    },
+  })
+  const page = pages[0].component
+  react.render(page, { t: (key) => key })
+  await settle()
+  let { tree } = react.render(page, { t: (key) => key })
+
+  elementsOf(tree, 'hdci-btn').find((node) => node.props.title === 'shot.snapshot').props.onClick()
+  await settle()
+  await settle()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+
+  assert.equal(copied.length, 1, 'the capture is handed to the clipboard service')
+  assert.deepEqual(copied[0], { bytes: 3, mediaType: 'image/jpeg', name: 'hdc-shot-1.jpg' })
+  // The service is handed a *reader*, not finished bytes: the clipboard write
+  // must begin inside the click, so it cannot wait for the capture first.
+  assert.equal(typeof handed[0].read, 'function', 'the blob is passed as a reader, preserving the activation window')
+  assert.match(textOf(tree).join(' '), /shot\.snapshotCopied/u, 'the panel says the capture was copied')
+  // The row must offer the two actions a user can actually use.
+  const artifacts = elementsOf(tree, 'hdci-artifact')
+  assert.equal(artifacts.length, 1)
+  const titles = artifacts[0].children.flat(Infinity)
+    .flatMap((child) => (Array.isArray(child?.children) ? child.children : [child]))
+    .map((child) => child?.props?.title)
+    .filter(Boolean)
+  assert.ok(titles.includes('shot.copyAgain'), 'a copied capture can be copied again')
+  assert.ok(titles.includes('shot.save'), 'and it can still be saved to a file')
+  assert.equal(elementsOf(tree, 'hdci-link').length, 0, 'no bare download link, which cannot authenticate in the shell')
+})
+
+test('a capture with no clipboard available reports the failure instead of claiming success', async () => {
+  const { pages, react } = loadClient(async (url) => {
+    const pathname = String(url).split('?')[0]
+    if (pathname === '/hdc/devices') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
+    }
+    if (pathname === '/hdc/capture') {
+      return {
+        ok: true,
+        status: 200,
+        clone() {
+          return {
+            json: async () => ({ device: 'phone-1', artifactId: 'shot-1', name: 'a.jpg', mediaType: 'image/jpeg', bytes: 3 }),
+          }
+        },
+      }
+    }
+    if (pathname === '/hdc/artifact/shot-1') {
+      return { ok: false, status: 500, blob: async () => new Blob([]) }
+    }
+    throw new Error(`unexpected ${pathname}`)
+  }, {
+    services: {
+      fileActions: {
+        canSaveAs: true,
+        async copyImage() { throw new Error('copy refused') },
+        async save() { return { status: 'cancelled' } },
+      },
+    },
+  })
+  const page = pages[0].component
+  react.render(page, { t: (key) => key })
+  await settle()
+  let { tree } = react.render(page, { t: (key) => key })
+
+  elementsOf(tree, 'hdci-btn').find((node) => node.props.title === 'shot.snapshot').props.onClick()
+  await settle()
+  await settle()
+  ;({ tree } = react.render(page, { t: (key) => key }))
+
+  assert.equal(/shot\.snapshotCopied/u.test(textOf(tree).join(' ')), false, 'a failed read must not be reported as a copy')
+  assert.equal(elementsOf(tree, 'hdci-artifact-error').length, 1, 'the failure is shown')
+})
+
+test('saving a capture goes through the file actions and reports the chosen path', async () => {
+  // A save used to be an `<a href download>`, which the Desktop shell answers
+  // 403 because a download bypasses the authenticated request hook. The button
+  // hands the bytes to `fileActions.save`, which opens the native dialog and
+  // answers with the path the user picked.
+  const saved = []
+  const { pages, react } = loadClient(async (url) => {
+    const pathname = String(url).split('?')[0]
+    if (pathname === '/hdc/devices') {
+      return { ok: true, status: 200, clone() { return { json: async () => ({ hdcPath: '/x/hdc', devices: ['phone-1'] }) } } }
+    }
+    if (pathname === '/hdc/capture') {
+      return {
+        ok: true,
+        status: 200,
+        clone() {
+          return {
+            json: async () => ({
+              device: 'phone-1',
+              artifactId: 'shot-1',
+              name: 'hdc-shot-1.jpg',
+              mediaType: 'image/jpeg',
+              bytes: 3,
+            }),
+          }
+        },
+      }
+    }
+    if (pathname === '/hdc/artifact/shot-1') {
+      return { ok: true, status: 200, blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/jpeg' }) }
+    }
+    throw new Error(`unexpected ${pathname}`)
+  }, {
+    services: {
+      fileActions: {
+        canSaveAs: true,
+        async copyImage() {},
+        async save(source, mode) {
+          const blob = await source.read(new AbortController().signal)
+          saved.push({ mode, mediaType: source.mediaType, name: source.name, bytes: blob.size })
+          return { status: 'saved', path: '/Users/me/Desktop/hdc-shot-1.jpg' }
+        },
+      },
+    },
+  })
+  const page = pages[0].component
+  /** Render a key with its parameters, so a caption's path is visible. */
+  const renderKey = (key, params) => (params === undefined ? key : `${key} ${JSON.stringify(params)}`)
+  react.render(page, { t: renderKey })
+  await settle()
+  let { tree } = react.render(page, { t: renderKey })
+
+  // Capture first, so there is a row to save from.
+  elementsOf(tree, 'hdci-btn').find((node) => node.props.title === 'shot.snapshot').props.onClick()
+  await settle()
+  await settle()
+  ;({ tree } = react.render(page, { t: renderKey }))
+
+  const saveButton = elementsOf(tree, 'hdci-btn').find((node) => node.props.title === 'shot.save')
+  assert.ok(saveButton !== undefined, 'a copied capture still offers a save')
+  saveButton.props.onClick()
+  await settle()
+  await settle()
+  ;({ tree } = react.render(page, { t: renderKey }))
+
+  assert.equal(saved.length, 1)
+  assert.deepEqual(saved[0], { mode: 'saveAs', mediaType: 'image/jpeg', name: 'hdc-shot-1.jpg', bytes: 3 })
+  assert.match(textOf(tree).join(' '), /shot\.savedTo/u, 'the panel reports where the file went')
+  // The path is the row's tooltip rather than inline text, so a long path cannot
+  // push the actions out of the row.
+  const captions = elementsOf(tree, 'hdci-artifact-text').map((node) => node.props.title)
+  assert.ok(
+    captions.some((title) => typeof title === 'string' && title.includes('/Users/me/Desktop/hdc-shot-1.jpg')),
+    `the chosen path is reported, got ${JSON.stringify(captions)}`,
+  )
 })
 
 test('a drag that leaves the picture says so, instead of a frozen readout', () => {

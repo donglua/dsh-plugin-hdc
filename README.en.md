@@ -51,11 +51,16 @@ device:
   place on a real device. Inputs are queued rather than dropped, so a double tap
   or a fast second tap is delivered in order instead of vanishing while the first
   one is still in flight, and the buttons stay usable meanwhile.
-- **Screenshot** — saves the current frame at the device's own resolution and
-  offers a link to download it.
+- **Screenshot** — captures the current frame at the device's own resolution and
+  copies it straight to the clipboard, ready to paste. A **Copy again** button
+  re-copies it, and **Save** writes it to a file through the application's native
+  save dialog. No file is written until you ask for one; configure `downloadDir`
+  to have every capture land there as well.
 - **Record** — captures frames for the length picked beside the button (5, 10, 20,
   or 30 seconds) and joins them into an mp4. Pressing the recording button again
-  stops early. Both results are offered as a download link under the buttons.
+  stops early. A finished recording gets the same Save button. A frame sequence —
+  the fallback when ffmpeg is unavailable — reports its path and offers no save,
+  because there is no single file to hand over.
 - **Back / Home / Power**, plus a text row for typing into the focused field.
 - **Interface hierarchy** — collapsible; each row carries a button that taps that
   control's own center, so a control without a label is still reachable.
@@ -121,7 +126,7 @@ needed. With several devices attached, pass `device`; with exactly one, omit it.
 | Key | Meaning |
 |---|---|
 | `hdcPath` | Absolute path of the `hdc` executable. Omit to use the default search. |
-| `downloadDir` | Directory for received files, panel screenshots, and recordings. Defaults to the session directory. |
+| `downloadDir` | Directory for received files and recordings, and for panel screenshots when you want them written automatically. When unset, a screenshot is held in memory for copying and saving and writes nothing; a recording still lands in the working directory, because a video is a file. |
 | `ffmpegPath` | Absolute path of `ffmpeg`, used to join a recording into an mp4. Omit to use the default search. |
 
 All settings are optional strings. A value of another type is rejected when the
@@ -191,8 +196,16 @@ plugin loads, naming the field, rather than failing partway through a device cal
 - **The picture is MJPEG in a plain `<img>`.** The live picture uses
   `multipart/x-mixed-replace`, which lets the browser repaint the element as each
   part arrives — no canvas, no decoder, no polling. Capture and recording results
-  are served by an opaque id from an in-memory registry, so the panel can offer a
-  download link without exposing an arbitrary local path over HTTP.
+  are served by an opaque id from an in-memory registry, so the panel can fetch the
+  bytes back without exposing an arbitrary local path over HTTP.
+- **Saving goes through the application's file actions, not an `<a download>`.**
+  The Desktop shell takes over downloads only under `/api/`, while this plugin's
+  routes live under `/hdc/`, so such a download is handed to Chromium — which
+  sends it around the hook that stamps the shell's renderer marker, and the Host
+  refuses an unmarked request. That is why the panel's old download link did not
+  save anything. The panel calls the client `fileActions` service instead: a
+  native save dialog on Desktop, an ordinary download in a plain browser, and the
+  same service writes images to the clipboard.
 - **Remote scratch files are cleaned up.** Temporary files under
   `/data/local/tmp` are removed on every exit path, including a failed capture,
   and the removal is awaited before the call returns.
